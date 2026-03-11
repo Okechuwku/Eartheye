@@ -2,6 +2,7 @@ import React from 'react';
 import { Link, useNavigate } from 'react-router-dom';
 import { useAuth } from '../context/AuthContext';
 import { Eye, Shield, LogOut, Menu } from 'lucide-react';
+import { isAdminRole, roleBadge } from '../utils/roles.js';
 
 export default function Navbar() {
   const { user, logout } = useAuth();
@@ -23,11 +24,14 @@ export default function Navbar() {
         {user ? (
           <>
             <Link to="/dashboard" className="text-cyber-text hover:text-cyber-blue transition-colors font-mono uppercase text-sm">Dashboard</Link>
-            {user.role === 'Admin' && (
+            {isAdminRole(user.role) && (
               <Link to="/admin" className="text-cyber-text hover:text-cyber-purple transition-colors font-mono uppercase text-sm">Admin</Link>
             )}
             <div className="flex items-center gap-4 border-l border-cyber-dim/30 pl-6">
-              <span className="text-cyber-dim text-sm">{user.email}</span>
+              <div className="text-right">
+                <div className="text-cyber-dim text-sm">{user.email}</div>
+                <div className="text-[10px] uppercase tracking-widest text-cyber-blue font-mono">{roleBadge(user.role)}</div>
+              </div>
               <button 
                 onClick={handleLogout}
                 className="text-cyber-pink hover:text-white transition-colors flex items-center gap-1 text-sm font-mono uppercase"

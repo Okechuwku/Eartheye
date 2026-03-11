@@ -1,10 +1,28 @@
 import React, { useEffect, useRef } from 'react';
 
 export default function TerminalLogs({ logs }) {
-  const endOfMessagesRef = useRef(null);
+  const containerRef = useRef(null);
+  const shouldAutoScroll = useRef(true);
+
+  // Only auto-scroll if user hasn't manually scrolled up
+  const handleScroll = () => {
+    if (containerRef.current) {
+      const { scrollHeight, scrollTop, clientHeight } = containerRef.current;
+      // Consider it auto-scroll if user is near the bottom (within 100px tolerance)
+      shouldAutoScroll.current = scrollHeight - scrollTop - clientHeight < 100;
+    }
+  };
 
   useEffect(() => {
-    endOfMessagesRef.current?.scrollIntoView({ behavior: 'smooth' });
+    // Only scroll the terminal container (never the page)
+    if (shouldAutoScroll.current && containerRef.current) {
+      requestAnimationFrame(() => {
+        const el = containerRef.current;
+        if (el) {
+          el.scrollTop = el.scrollHeight;
+        }
+      });
+    }
   }, [logs]);
 
   return (
@@ -17,15 +35,21 @@ export default function TerminalLogs({ logs }) {
         </div>
         <span className="ml-4 text-cyber-dim text-xs select-none">root@eartheye:~#</span>
       </div>
-      <div className="p-4 overflow-y-auto flex-grow space-y-1">
+      <div className="p-4 overflow-y-auto flex-grow space-y-1" onScroll={handleScroll} ref={containerRef}>
         {logs.map((log, idx) => (
-          <div key={idx} className="break-all whitespace-pre-wrap">
+          <div key={idx} className={`break-all whitespace-pre-wrap ${getLogClassName(log)}`}>
             {log}
           </div>
         ))}
         {logs.length === 0 && <div className="text-cyber-dim opacity-50 italic animate-pulse">Awaiting neural transmission...</div>}
-        <div ref={endOfMessagesRef} />
       </div>
     </div>
   );
+}
+
+function getLogClassName(log) {
+  if (log.includes('[ERROR]') || log.includes('[-]')) return 'text-cyber-pink';
+  if (log.includes('[+]')) return 'text-cyber-green';
+  if (log.includes('[SYSTEM]') || log.includes('[*]')) return 'text-cyber-blue';
+  return 'text-cyber-text';
 }

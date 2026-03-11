@@ -31,8 +31,9 @@ export function AuthProvider({ children }) {
   };
 
   const login = async (email, password) => {
+    const normalizedEmail = email.trim().toLowerCase();
     const formData = new URLSearchParams();
-    formData.append('username', email);
+    formData.append('username', normalizedEmail);
     formData.append('password', password);
     
     const res = await axios.post(`${API_URL}/auth/login`, formData, {
@@ -45,8 +46,9 @@ export function AuthProvider({ children }) {
   };
 
   const register = async (email, password) => {
-    await axios.post(`${API_URL}/auth/register`, { email, password });
-    await login(email, password);
+    const normalizedEmail = email.trim().toLowerCase();
+    await axios.post(`${API_URL}/auth/register`, { email: normalizedEmail, password });
+    await login(normalizedEmail, password);
   };
 
   const logout = () => {

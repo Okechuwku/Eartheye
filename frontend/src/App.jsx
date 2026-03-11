@@ -8,13 +8,14 @@ import NewScan from './pages/NewScan.jsx';
 import ScanResults from './pages/ScanResults.jsx';
 import AdminPanel from './pages/AdminPanel.jsx';
 import { useAuth } from './context/AuthContext.jsx';
+import { isAdminRole } from './utils/roles.js';
 
 function ProtectedRoute({ children, adminOnly = false }) {
   const { user, loading } = useAuth();
   
   if (loading) return <div className="min-h-screen flex items-center justify-center text-cyber-blue font-mono">Initializing Neural Link...</div>;
   if (!user) return <Navigate to="/login" />;
-  if (adminOnly && user.role !== 'Admin') return <Navigate to="/dashboard" />;
+  if (adminOnly && !isAdminRole(user.role)) return <Navigate to="/dashboard" />;
   
   return children;
 }
