@@ -1,23 +1,34 @@
 import asyncio
 import os
 
-from fastapi import FastAPI, Depends, HTTPException, status
+from fastapi import FastAPI, Depends, HTTPException, Request, status
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import JSONResponse
 from sqlalchemy import func
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.future import select
 from fastapi.security import OAuth2PasswordRequestForm
+from starlette.middleware.trustedhost import TrustedHostMiddleware
 
 from backend.database import engine, Base, get_db, AsyncSessionLocal
 from backend.models import User, Scan
 from backend import schemas, auth
 from backend.routers import scans, admin, dashboard, websockets
+from backend.security import build_rate_limit_key, rate_limiter
 from backend.services.automation import automation_worker
 from backend.services.schema_sync import ensure_runtime_schema
 from backend.services.subscriptions import normalize_role, subscription_plan_for_role
 
 DEFAULT_ADMIN_EMAIL = os.getenv("DEFAULT_ADMIN_EMAIL", "okechuwkujoel44@gmail.com").strip().lower()
 DEFAULT_ADMIN_PASSWORD = os.getenv("DEFAULT_ADMIN_PASSWORD", "Scientist44@").strip()
+CORS_ORIGINS = [origin.strip() for origin in os.getenv("CORS_ORIGINS", "http://localhost:5173,http://127.0.0.1:5173").split(",") if origin.strip()]
+ALLOWED_HOSTS = [host.strip() for host in os.getenv("ALLOWED_HOSTS", "localhost,127.0.0.1,eartheye.me,www.eartheye.me,api.eartheye.me").split(",") if host.strip()]
+
+RATE_LIMIT_WINDOW_SECONDS = int(os.getenv("RATE_LIMIT_WINDOW_SECONDS", "60"))
+RATE_LIMIT_GLOBAL_REQUESTS = int(os.getenv("RATE_LIMIT_GLOBAL_REQUESTS", "240"))
+RATE_LIMIT_AUTH_REQUESTS = int(os.getenv("RATE_LIMIT_AUTH_REQUESTS", "20"))
+RATE_LIMIT_SCAN_CREATE_REQUESTS = int(os.getenv("RATE_LIMIT_SCAN_CREATE_REQUESTS", "10"))
+RATE_LIMIT_DISABLED = os.getenv("RATE_LIMIT_DISABLED", "false").strip().lower() == "true"
 
 app = FastAPI(title="Eartheye API")
 
@@ -28,11 +39,47 @@ app.include_router(websockets.router)
 
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],
+    allow_origins=CORS_ORIGINS if CORS_ORIGINS else ["*"],
     allow_credentials=True,
-    allow_methods=["*"],
-    allow_headers=["*"],
+    allow_methods=["GET", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"],
+    allow_headers=["Authorization", "Content-Type", "Accept", "Origin"],
 )
+
+app.add_middleware(
+    TrustedHostMiddleware,
+    allowed_hosts=ALLOWED_HOSTS if ALLOWED_HOSTS else ["*"],
+)
+
+
+@app.middleware("http")
+async def enforce_rate_limits(request: Request, call_next):
+    if RATE_LIMIT_DISABLED:
+        return await call_next(request)
+
+    path = request.url.path
+    if path.startswith("/docs") or path.startswith("/redoc") or path.startswith("/openapi"):
+        return await call_next(request)
+
+    bucket = "global"
+    limit = RATE_LIMIT_GLOBAL_REQUESTS
+
+    if path.startswith("/api/auth/"):
+        bucket = "auth"
+        limit = RATE_LIMIT_AUTH_REQUESTS
+    elif request.method.upper() == "POST" and path == "/api/scans/":
+        bucket = "scan_create"
+        limit = RATE_LIMIT_SCAN_CREATE_REQUESTS
+
+    key = build_rate_limit_key(request, bucket)
+    allowed, retry_after = await rate_limiter.check(key, limit, RATE_LIMIT_WINDOW_SECONDS)
+    if not allowed:
+        return JSONResponse(
+            status_code=429,
+            content={"detail": "Rate limit exceeded. Please retry shortly."},
+            headers={"Retry-After": str(retry_after)},
+        )
+
+    return await call_next(request)
 
 @app.on_event("startup")
 async def startup():

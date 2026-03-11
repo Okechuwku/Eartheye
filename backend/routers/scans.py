@@ -1,4 +1,8 @@
 from datetime import datetime
+import asyncio
+import ipaddress
+import os
+import socket
 
 from fastapi import APIRouter, Depends, HTTPException
 from fastapi.responses import FileResponse
@@ -7,7 +11,6 @@ from sqlalchemy.future import select
 from sqlalchemy import func
 from typing import List
 import re
-import os
 
 from backend.database import get_db
 from backend.models import (
@@ -31,6 +34,11 @@ router = APIRouter(prefix="/api/scans", tags=["scans"])
 DOMAIN_REGEX = re.compile(
     r"^(?=.{1,253}$)(?:[a-zA-Z0-9](?:[a-zA-Z0-9-]{0,61}[a-zA-Z0-9])?\.)+[a-zA-Z]{2,63}$"
 )
+ALLOWED_SCAN_TYPES = {"Basic Scan", "Recon Scan", "Full Scan"}
+ALLOW_PRIVATE_SCAN_TARGETS = os.getenv("ALLOW_PRIVATE_SCAN_TARGETS", "false").strip().lower() == "true"
+MIN_AUTOMATION_INTERVAL_MINUTES = 60
+MAX_AUTOMATION_INTERVAL_MINUTES = 10080
+MAX_AUTOMATION_DOMAINS = int(os.getenv("MAX_AUTOMATION_DOMAINS", "50"))
 
 
 def normalize_domain(raw_value: str) -> str:
@@ -47,6 +55,42 @@ def validate_domain(raw_value: str) -> str:
     return target
 
 
+def validate_scan_type(scan_type: str) -> str:
+    normalized_type = (scan_type or "").strip()
+    if normalized_type not in ALLOWED_SCAN_TYPES:
+        raise HTTPException(
+            status_code=400,
+            detail=f"Invalid scan type. Allowed values: {', '.join(sorted(ALLOWED_SCAN_TYPES))}",
+        )
+    return normalized_type
+
+
+async def verify_domain_is_public(target: str):
+    if ALLOW_PRIVATE_SCAN_TARGETS:
+        return
+
+    try:
+        addr_info = await asyncio.to_thread(socket.getaddrinfo, target, None)
+    except socket.gaierror:
+        raise HTTPException(status_code=400, detail="Domain verification failed: target does not resolve in public DNS")
+
+    public_ips: set[str] = set()
+    for entry in addr_info:
+        ip_value = entry[4][0]
+        try:
+            parsed_ip = ipaddress.ip_address(ip_value)
+        except ValueError:
+            continue
+        if parsed_ip.is_global:
+            public_ips.add(ip_value)
+
+    if not public_ips:
+        raise HTTPException(
+            status_code=400,
+            detail="Domain verification failed: target resolves only to private or non-routable addresses",
+        )
+
+
 def ensure_scan_access(scan: Scan, current_user: User):
     if scan.user_id != current_user.id and not is_admin_role(current_user.role):
         raise HTTPException(status_code=403, detail="Not enough permissions")
@@ -54,9 +98,11 @@ def ensure_scan_access(scan: Scan, current_user: User):
 @router.post("/", response_model=schemas.ScanResponse)
 async def create_scan(scan_in: schemas.ScanCreate, current_user: User = Depends(auth.get_current_user), db: AsyncSession = Depends(get_db)):
     target = validate_domain(scan_in.target_domain)
+    scan_type = validate_scan_type(scan_in.scan_type)
+    await verify_domain_is_public(target)
     role = normalize_role(current_user.role)
 
-    if not can_run_scan(role, scan_in.scan_type):
+    if not can_run_scan(role, scan_type):
         raise HTTPException(
             status_code=403,
             detail="Free users can only run Basic Scan. Upgrade to Premium to unlock recon, JavaScript intelligence, GraphQL, ffuf, and nuclei.",
@@ -72,7 +118,7 @@ async def create_scan(scan_in: schemas.ScanCreate, current_user: User = Depends(
     new_scan = Scan(
         user_id=current_user.id,
         target_domain=target,
-        scan_type=scan_in.scan_type,
+        scan_type=scan_type,
         status="Pending",
         created_at=datetime.utcnow(),
         summary={},
@@ -82,7 +128,7 @@ async def create_scan(scan_in: schemas.ScanCreate, current_user: User = Depends(
     await db.commit()
     await db.refresh(new_scan)
     
-    trigger_scan_task(new_scan.id, target, scan_in.scan_type, role)
+    trigger_scan_task(new_scan.id, target, scan_type, role)
     return new_scan
 
 @router.get("/", response_model=List[schemas.ScanResponse])
@@ -150,7 +196,21 @@ async def create_automation_targets(payload: schemas.AutomationBatchCreate, curr
     if not payload.domains:
         raise HTTPException(status_code=400, detail="At least one domain is required")
 
+    if len(payload.domains) > MAX_AUTOMATION_DOMAINS:
+        raise HTTPException(status_code=400, detail=f"Maximum {MAX_AUTOMATION_DOMAINS} domains allowed per automation batch")
+
+    if payload.interval_minutes < MIN_AUTOMATION_INTERVAL_MINUTES or payload.interval_minutes > MAX_AUTOMATION_INTERVAL_MINUTES:
+        raise HTTPException(
+            status_code=400,
+            detail=f"interval_minutes must be between {MIN_AUTOMATION_INTERVAL_MINUTES} and {MAX_AUTOMATION_INTERVAL_MINUTES}",
+        )
+
+    scan_type = validate_scan_type(payload.scan_type)
+
     domains = sorted({validate_domain(domain) for domain in payload.domains})
+    for domain in domains:
+        await verify_domain_is_public(domain)
+
     targets: list[MonitoringTarget] = []
 
     for domain in domains:
@@ -162,7 +222,7 @@ async def create_automation_targets(payload: schemas.AutomationBatchCreate, curr
             target = MonitoringTarget(
                 user_id=current_user.id,
                 domain=domain,
-                scan_type=payload.scan_type,
+                scan_type=scan_type,
                 interval_minutes=payload.interval_minutes,
                 enabled=True,
                 next_run_at=datetime.utcnow(),
@@ -171,7 +231,7 @@ async def create_automation_targets(payload: schemas.AutomationBatchCreate, curr
             )
             db.add(target)
         else:
-            target.scan_type = payload.scan_type
+            target.scan_type = scan_type
             target.interval_minutes = payload.interval_minutes
             target.enabled = True
             target.next_run_at = datetime.utcnow()

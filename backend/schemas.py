@@ -1,14 +1,14 @@
 from pydantic import BaseModel, EmailStr, Field
-from typing import Optional, List, Dict, Any
+from typing import Optional, List, Dict, Any, Literal
 from datetime import datetime
 
 class UserCreate(BaseModel):
     email: EmailStr
-    password: str
+    password: str = Field(min_length=12, max_length=128)
 
 
 class SubscriptionUpdate(BaseModel):
-    role: str
+    role: Literal["Free", "Premium", "Administrator"]
     subscription_status: str = "active"
 
 class UserResponse(BaseModel):
@@ -26,14 +26,14 @@ class Token(BaseModel):
     token_type: str
 
 class ScanCreate(BaseModel):
-    target_domain: str
-    scan_type: str
+    target_domain: str = Field(min_length=3, max_length=253)
+    scan_type: Literal["Basic Scan", "Recon Scan", "Full Scan"]
 
 
 class AutomationBatchCreate(BaseModel):
     domains: List[str] = Field(default_factory=list)
-    scan_type: str = "Recon Scan"
-    interval_minutes: int = 720
+    scan_type: Literal["Basic Scan", "Recon Scan", "Full Scan"] = "Recon Scan"
+    interval_minutes: int = Field(default=720, ge=60, le=10080)
 
 
 class AutomationTargetUpdate(BaseModel):

@@ -2,8 +2,7 @@ import React, { useEffect, useState } from 'react';
 import axios from 'axios';
 import { Activity, Crown, Download, KeyRound, Shield, ShieldAlert, Trash2, Users } from 'lucide-react';
 import { roleBadge } from '../utils/roles.js';
-
-const API_BASE = 'http://localhost:8000';
+import { API_URL } from '../config/api.js';
 
 const ROLE_OPTIONS = ['Free', 'Premium', 'Administrator'];
 
@@ -25,11 +24,11 @@ export default function AdminPanel() {
   const fetchAdminData = async () => {
     try {
       const [overviewRes, usersRes, scansRes, vulnerabilitiesRes, secretsRes] = await Promise.all([
-        axios.get(`${API_BASE}/api/admin/overview`),
-        axios.get(`${API_BASE}/api/admin/users`),
-        axios.get(`${API_BASE}/api/admin/scans`),
-        axios.get(`${API_BASE}/api/admin/vulnerabilities`),
-        axios.get(`${API_BASE}/api/admin/secrets`),
+        axios.get(`${API_URL}/admin/overview`),
+        axios.get(`${API_URL}/admin/users`),
+        axios.get(`${API_URL}/admin/scans`),
+        axios.get(`${API_URL}/admin/vulnerabilities`),
+        axios.get(`${API_URL}/admin/secrets`),
       ]);
       setOverview(overviewRes.data);
       setUsers(usersRes.data);
@@ -49,7 +48,7 @@ export default function AdminPanel() {
 
   const updateSubscription = async (userId, role) => {
     try {
-      await axios.patch(`${API_BASE}/api/admin/users/${userId}/subscription`, {
+      await axios.patch(`${API_URL}/admin/users/${userId}/subscription`, {
         role,
         subscription_status: 'active',
       });
@@ -61,15 +60,32 @@ export default function AdminPanel() {
 
   const deleteScan = async (scanId) => {
     try {
-      await axios.delete(`${API_BASE}/api/admin/scans/${scanId}`);
+      await axios.delete(`${API_URL}/admin/scans/${scanId}`);
       await fetchAdminData();
     } catch (err) {
       console.error(err);
     }
   };
 
-  const downloadReport = (scanId) => {
-    window.open(`${API_BASE}/api/admin/scans/${scanId}/report`, '_blank', 'noopener,noreferrer');
+  const downloadReport = async (scanId) => {
+    try {
+      const response = await axios.get(`${API_URL}/admin/scans/${scanId}/report`, {
+        responseType: 'blob',
+      });
+      const contentDisposition = response.headers['content-disposition'] || '';
+      const fileNameMatch = contentDisposition.match(/filename\*?=(?:UTF-8''|\")?([^\";]+)/i);
+      const fileName = fileNameMatch ? decodeURIComponent(fileNameMatch[1].replace(/\"/g, '')) : `scan-${scanId}-report.txt`;
+      const blobUrl = window.URL.createObjectURL(new Blob([response.data], { type: 'text/plain' }));
+      const link = document.createElement('a');
+      link.href = blobUrl;
+      link.download = fileName;
+      document.body.appendChild(link);
+      link.click();
+      link.remove();
+      window.URL.revokeObjectURL(blobUrl);
+    } catch (err) {
+      console.error(err);
+    }
   };
 
   if (loading) return <div className="text-cyber-purple font-mono p-10">Accessing secure mainframe...</div>;

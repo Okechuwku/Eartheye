@@ -3,6 +3,7 @@ import { motion } from 'framer-motion';
 import axios from 'axios';
 import { useNavigate, useLocation } from 'react-router-dom';
 import { Activity, ShieldAlert, Target, Play } from 'lucide-react';
+import { API_URL } from '../config/api.js';
 
 export default function Dashboard() {
   const [stats, setStats] = useState({
@@ -24,7 +25,7 @@ export default function Dashboard() {
 
   const fetchStats = async () => {
     try {
-      const res = await axios.get('http://localhost:8000/api/dashboard/stats');
+      const res = await axios.get(`${API_URL}/dashboard/stats`);
       setStats(res.data);
     } catch (err) {
       console.error(err);

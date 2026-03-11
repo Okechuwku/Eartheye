@@ -1,4 +1,5 @@
 from datetime import datetime, timedelta
+import os
 from typing import Optional
 import bcrypt as _bcrypt
 from jose import JWTError, jwt
@@ -12,12 +13,11 @@ from backend.database import get_db
 from backend.models import User
 from backend.services.subscriptions import is_admin_role, normalize_role, subscription_plan_for_role
 
-# Development secret key
-SECRET_KEY = "super_secret_eartheye_key"
-ALGORITHM = "HS256"
-ACCESS_TOKEN_EXPIRE_MINUTES = 60 * 24 * 7 # 1 week
+SECRET_KEY = os.getenv("JWT_SECRET", "change_me_in_production")
+ALGORITHM = os.getenv("JWT_ALGORITHM", "HS256")
+ACCESS_TOKEN_EXPIRE_MINUTES = int(os.getenv("JWT_EXPIRE_MINUTES", str(60 * 24 * 7)))
 
-oauth2_scheme = OAuth2PasswordBearer(tokenUrl="api/auth/login")
+oauth2_scheme = OAuth2PasswordBearer(tokenUrl="/api/auth/login")
 
 def verify_password(plain_password, hashed_password):
     return _bcrypt.checkpw(plain_password.encode("utf-8"), hashed_password.encode("utf-8"))

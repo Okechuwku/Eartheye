@@ -3,8 +3,7 @@ import { useParams } from 'react-router-dom';
 import ForceGraph2D from 'react-force-graph-2d';
 import axios from 'axios';
 import { Download, FileWarning, KeyRound, Radar, Server, ShieldAlert } from 'lucide-react';
-
-const API_BASE = 'http://localhost:8000';
+import { API_BASE_URL, API_URL } from '../config/api.js';
 
 const emptyGraph = { nodes: [], links: [] };
 
@@ -14,11 +13,12 @@ export default function ScanResults() {
   const [graphData, setGraphData] = useState(emptyGraph);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState(null);
+  const [downloadingReport, setDownloadingReport] = useState(false);
 
   useEffect(() => {
     const fetchResults = async () => {
       try {
-        const res = await axios.get(`${API_BASE}/api/scans/${id}/results`);
+        const res = await axios.get(`${API_URL}/scans/${id}/results`);
         setResults(res.data);
         setGraphData(res.data.graph_data?.nodes?.length ? res.data.graph_data : emptyGraph);
         setLoading(false);
@@ -30,6 +30,34 @@ export default function ScanResults() {
     };
     fetchResults();
   }, [id]);
+
+  const downloadReport = async () => {
+    if (!results?.report_download_url || downloadingReport) return;
+    setDownloadingReport(true);
+    try {
+      const response = await axios.get(`${API_BASE_URL}${results.report_download_url}`, {
+        responseType: 'blob',
+      });
+      const contentDisposition = response.headers['content-disposition'] || '';
+      const fileNameMatch = contentDisposition.match(/filename\*?=(?:UTF-8''|\")?([^\";]+)/i);
+      const fileName = fileNameMatch
+        ? decodeURIComponent(fileNameMatch[1].replace(/\"/g, ''))
+        : `${results?.scan?.target_domain || 'scan'}-report.txt`;
+      const blobUrl = window.URL.createObjectURL(new Blob([response.data], { type: 'text/plain' }));
+      const link = document.createElement('a');
+      link.href = blobUrl;
+      link.download = fileName;
+      document.body.appendChild(link);
+      link.click();
+      link.remove();
+      window.URL.revokeObjectURL(blobUrl);
+    } catch (err) {
+      console.error(err);
+      setError(err.response?.data?.detail || 'Unable to download report.');
+    } finally {
+      setDownloadingReport(false);
+    }
+  };
 
   if (loading) return <div className="text-cyber-blue font-mono p-10">Decrypting operational results...</div>;
   if (error || !results) return <div className="text-cyber-pink font-mono p-10">Error: {error || 'Scan record not found in system.'}</div>;
@@ -53,14 +81,14 @@ export default function ScanResults() {
             {scan.status}
           </span>
           {reportDownloadUrl && (
-            <a
-              href={`${API_BASE}${reportDownloadUrl}`}
-              target="_blank"
-              rel="noreferrer"
+            <button
+              type="button"
+              onClick={downloadReport}
+              disabled={downloadingReport}
               className="px-4 py-2 rounded border border-cyber-blue text-cyber-blue hover:bg-cyber-blue hover:text-cyber-bg transition-colors font-mono text-xs uppercase tracking-widest flex items-center gap-2"
             >
-              <Download className="w-4 h-4" /> Download Report
-            </a>
+              <Download className="w-4 h-4" /> {downloadingReport ? 'Downloading...' : 'Download Report'}
+            </button>
           )}
         </div>
       </div>

@@ -5,8 +5,7 @@ import TerminalLogs from '../components/TerminalLogs';
 import { Activity, Crown, Radar, ShieldCheck, Target, Trash2, Zap } from 'lucide-react';
 import { useAuth } from '../context/AuthContext';
 import { isAdminRole, isPremiumRole, roleBadge } from '../utils/roles.js';
-
-const API_BASE = 'http://localhost:8000';
+import { API_URL, buildWebSocketUrl } from '../config/api.js';
 
 const SCAN_OPTIONS = [
   {
@@ -87,7 +86,7 @@ export default function NewScan() {
 
   const fetchAutomationTargets = async () => {
     try {
-      const res = await axios.get(`${API_BASE}/api/scans/automation/targets`);
+      const res = await axios.get(`${API_URL}/scans/automation/targets`);
       setAutomationTargets(res.data);
     } catch (err) {
       console.error(err);
@@ -105,7 +104,7 @@ export default function NewScan() {
     setIsLoading(true);
     setLogs([]);
     try {
-      const res = await axios.post(`${API_BASE}/api/scans/`, {
+      const res = await axios.post(`${API_URL}/scans/`, {
         target_domain: target,
         scan_type: scanType
       });
@@ -129,7 +128,7 @@ export default function NewScan() {
       wsRef.current.close();
     }
 
-    const socket = new WebSocket(`ws://localhost:8000/ws/scan/${scanId}`);
+    const socket = new WebSocket(buildWebSocketUrl(`/ws/scan/${scanId}`));
     let socketComplete = false;
     
     socket.onopen = () => appendLog('[SYSTEM] Secure neural link established. Waiting for scanner engine...');
@@ -170,7 +169,7 @@ export default function NewScan() {
 
     setAutomationLoading(true);
     try {
-      await axios.post(`${API_BASE}/api/scans/automation/targets`, {
+      await axios.post(`${API_URL}/scans/automation/targets`, {
         domains,
         scan_type: 'Recon Scan',
         interval_minutes: Number(monitorInterval),
@@ -188,7 +187,7 @@ export default function NewScan() {
 
   const handleToggleMonitoring = async (targetId, enabled) => {
     try {
-      await axios.patch(`${API_BASE}/api/scans/automation/targets/${targetId}`, { enabled });
+      await axios.patch(`${API_URL}/scans/automation/targets/${targetId}`, { enabled });
       await fetchAutomationTargets();
     } catch (err) {
       console.error(err);
@@ -197,7 +196,7 @@ export default function NewScan() {
 
   const handleDeleteMonitoring = async (targetId) => {
     try {
-      await axios.delete(`${API_BASE}/api/scans/automation/targets/${targetId}`);
+      await axios.delete(`${API_URL}/scans/automation/targets/${targetId}`);
       await fetchAutomationTargets();
     } catch (err) {
       console.error(err);

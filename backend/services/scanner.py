@@ -28,7 +28,7 @@ from backend.services.subscriptions import features_for_scan, normalize_role
 
 
 PROJECT_ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), "../.."))
-SCANS_DIR = os.path.join(PROJECT_ROOT, "scans")
+SCANS_DIR = os.path.abspath(os.getenv("SCAN_STORAGE_PATH", os.path.join(PROJECT_ROOT, "scans")))
 WORDLIST_PATH = os.path.join(PROJECT_ROOT, "backend", "services", "wordlists", "common.txt")
 REQUIRED_OUTPUT_FILES = {
     "subdomains": "subdomains.txt",
