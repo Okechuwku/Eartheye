@@ -4,6 +4,24 @@ import { motion } from 'framer-motion';
 import { useAuth } from '../context/AuthContext';
 import { Lock, User, ShieldAlert } from 'lucide-react';
 
+function formatRegistrationError(err) {
+  if (!err.response) {
+    return 'Registration failed. Frontend could not reach the API gateway.';
+  }
+
+  const detail = err.response.data?.detail;
+  if (Array.isArray(detail) && detail.length > 0) {
+    const firstIssue = detail[0];
+    return firstIssue?.msg || 'Registration failed due to invalid input.';
+  }
+
+  if (typeof detail === 'string' && detail.trim()) {
+    return detail;
+  }
+
+  return 'Registration failed. System rejected identity.';
+}
+
 export default function Register() {
   const [email, setEmail] = useState('');
   const [password, setPassword] = useState('');
@@ -13,11 +31,18 @@ export default function Register() {
   
   const handleSubmit = async (e) => {
     e.preventDefault();
+    setError('');
+
+    if (password.length < 12) {
+      setError('Password must be at least 12 characters long.');
+      return;
+    }
+
     try {
       await register(email, password);
       navigate('/dashboard');
     } catch (err) {
-      setError(err.response?.data?.detail || 'Registration failed. System rejected identity.');
+      setError(formatRegistrationError(err));
     }
   };
 
@@ -53,11 +78,13 @@ export default function Register() {
             <input 
               type="password" 
               required
+              minLength={12}
               value={password}
               onChange={(e) => setPassword(e.target.value)}
               className="w-full bg-cyber-bg/50 border border-cyber-purple/30 text-white pl-10 pr-4 py-3 rounded outline-none focus:border-cyber-purple transition-colors font-mono"
               placeholder="PASSPHRASE"
             />
+            <p className="mt-2 text-xs text-cyber-dim font-mono">Use at least 12 characters for your passphrase.</p>
           </div>
           
           <button 
