@@ -4,6 +4,10 @@
   "outputDirectory": "dist",
   "rewrites": [
     {
+      "source": "/api/(.*)",
+      "destination": "https://api.eartheye.me/api/$1"
+    },
+    {
       "source": "/(.*)",
       "destination": "/index.html"
     }

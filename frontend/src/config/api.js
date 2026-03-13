@@ -14,6 +14,15 @@ function inferDefaultApiBaseUrl() {
 
 const DEFAULT_API_BASE_URL = inferDefaultApiBaseUrl();
 
+function shouldUseRelativeApiProxy() {
+  if (typeof window === 'undefined') {
+    return false;
+  }
+
+  const { hostname } = window.location;
+  return hostname !== 'localhost' && hostname !== '127.0.0.1';
+}
+
 function stripTrailingSlash(value) {
   return value.replace(/\/+$/, '');
 }
@@ -32,17 +41,19 @@ const configuredApiUrl =
   import.meta.env.NEXT_PUBLIC_API_URL ||
   import.meta.env.API_URL;
 
-export const API_BASE_URL = normalizeApiBaseUrl(configuredApiUrl);
-export const API_URL = `${API_BASE_URL}/api`;
+const DIRECT_API_BASE_URL = normalizeApiBaseUrl(configuredApiUrl);
+
+export const API_BASE_URL = shouldUseRelativeApiProxy() ? '' : DIRECT_API_BASE_URL;
+export const API_URL = API_BASE_URL ? `${API_BASE_URL}/api` : '/api';
 
 export function buildWebSocketUrl(path) {
   const normalizedPath = path.startsWith('/') ? path : `/${path}`;
   try {
-    const base = new URL(API_BASE_URL);
+    const base = new URL(DIRECT_API_BASE_URL);
     const wsProtocol = base.protocol === 'https:' ? 'wss:' : 'ws:';
     return `${wsProtocol}//${base.host}${normalizedPath}`;
   } catch {
-    const fallback = API_BASE_URL.replace(/^http/, 'ws');
+    const fallback = DIRECT_API_BASE_URL.replace(/^http/, 'ws');
     return `${stripTrailingSlash(fallback)}${normalizedPath}`;
   }
 }
