@@ -1,4 +1,18 @@
-const DEFAULT_API_BASE_URL = 'http://localhost:8000';
+function inferDefaultApiBaseUrl() {
+  if (typeof window === 'undefined') {
+    return 'http://localhost:8000';
+  }
+
+  const { protocol, hostname } = window.location;
+  if (hostname === 'localhost' || hostname === '127.0.0.1') {
+    return 'http://localhost:8000';
+  }
+
+  const rootHost = hostname.replace(/^www\./i, '');
+  return `${protocol}//api.${rootHost}`;
+}
+
+const DEFAULT_API_BASE_URL = inferDefaultApiBaseUrl();
 
 function stripTrailingSlash(value) {
   return value.replace(/\/+$/, '');
