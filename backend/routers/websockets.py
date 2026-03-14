@@ -31,8 +31,19 @@ class ConnectionManager:
         self.log_history[scan_id] = self.log_history[scan_id][-500:]
 
         if scan_id in self.active_connections:
+            dead = []
             for connection in self.active_connections[scan_id]:
-                await connection.send_text(message)
+                try:
+                    await connection.send_text(message)
+                except Exception:
+                    dead.append(connection)
+            for connection in dead:
+                try:
+                    self.active_connections[scan_id].remove(connection)
+                except ValueError:
+                    pass
+            if not self.active_connections.get(scan_id):
+                self.active_connections.pop(scan_id, None)
 
 manager = ConnectionManager()
 

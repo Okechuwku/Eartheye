@@ -112,7 +112,10 @@ export default function NewScan() {
           setIsLoading(false);
           stopScanStatusPolling();
         } else if (status === 'Failed') {
-          appendLog('[SYSTEM] Scan failed. Open full report for details.');
+          const errorMsg = res.data?.summary?.error;
+          appendLog(errorMsg
+            ? `[ERROR] Scan failed: ${errorMsg}`
+            : '[SYSTEM] Scan failed. Open full report for details.');
           setIsLoading(false);
           stopScanStatusPolling();
         }

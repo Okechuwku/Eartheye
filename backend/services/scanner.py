@@ -377,7 +377,10 @@ def command_exists(command: str) -> bool:
 
 async def broadcast(scan_id: int, message: str):
     timestamp = datetime.utcnow().strftime("%H:%M:%S")
-    await manager.broadcast_log(scan_id, f"[{timestamp}] {message}")
+    try:
+        await manager.broadcast_log(scan_id, f"[{timestamp}] {message}")
+    except Exception:
+        pass  # telemetry failures must never abort the scan
 
 
 async def run_cmd_with_logs(scan_id: int, cmd: list[str], cwd: str, output_file: str | None = None) -> int:
@@ -1149,8 +1152,11 @@ async def run_scan(scan_id: int, target_domain: str, scan_type: str, user_role: 
 
         await broadcast(scan_id, "[*] Results saved to database")
     except Exception as exc:
-        await update_scan_status(scan_id, "Failed", output_dir=output_dir)
-        await broadcast(scan_id, f"[-] Scan failed: {exc}")
+        import traceback
+        error_detail = f"{type(exc).__name__}: {exc}"
+        error_trace = traceback.format_exc()
+        await update_scan_status(scan_id, "Failed", output_dir=output_dir, summary={"error": error_detail, "trace": error_trace})
+        await broadcast(scan_id, f"[-] Scan failed: {error_detail}")
 
 
 def trigger_scan_task(
