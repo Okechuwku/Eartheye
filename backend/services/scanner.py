@@ -59,6 +59,7 @@ SECRET_PATTERNS = [
 class ScanCollector:
     def __init__(self, target_domain: str):
         self.target_domain = target_domain
+        self.metadata: dict[str, object] = {}
         self.subdomains: dict[str, dict] = {}
         self.endpoints: dict[str, dict] = {}
         self.directories: dict[str, dict] = {}
@@ -244,7 +245,7 @@ class ScanCollector:
             severity = (vulnerability.get("severity") or "unknown").lower()
             severity_breakdown[severity] = severity_breakdown.get(severity, 0) + 1
 
-        return {
+        summary = {
             "subdomains": len(self.subdomains),
             "endpoints": len(self.endpoints),
             "directories": len(self.directories),
@@ -255,6 +256,9 @@ class ScanCollector:
             "javascript_files": sorted(self.js_files),
             "severity_breakdown": severity_breakdown,
         }
+        if self.metadata:
+            summary.update(self.metadata)
+        return summary
 
     def build_graph(self) -> dict:
         nodes = [{"id": self.target_domain, "name": self.target_domain, "group": 1, "val": 18}]
@@ -373,6 +377,31 @@ def find_best_endpoint(endpoints: dict[str, dict], matched: str | None) -> str |
 
 def command_exists(command: str) -> bool:
     return shutil.which(command) is not None
+
+
+def normalize_scan_scope(target_domain: str) -> str:
+    parts = [part for part in (target_domain or "").split(".") if part]
+    if len(parts) >= 3 and parts[0] == "www":
+        return ".".join(parts[1:])
+    return target_domain
+
+
+async def resolve_tool_status(features: set[str]) -> dict[str, str]:
+    tool_status = {
+        "subfinder": "available" if command_exists("subfinder") else "fallback-ctlogs",
+        "httpx": "available" if await _check_go_httpx() else "fallback-native",
+    }
+    if "katana" in features:
+        tool_status["katana"] = "available" if command_exists("katana") else "missing"
+    if "gau" in features:
+        tool_status["gau"] = "available" if command_exists("gau") else "missing"
+    if "javascript_intelligence" in features:
+        tool_status["linkfinder"] = "available" if command_exists("linkfinder") else "fallback-native"
+    if "ffuf" in features:
+        tool_status["ffuf"] = "available" if command_exists("ffuf") else "missing"
+    if "nuclei" in features:
+        tool_status["nuclei"] = "available" if command_exists("nuclei") else "missing"
+    return tool_status
 
 
 async def broadcast(scan_id: int, message: str):
@@ -639,6 +668,39 @@ def _normalize_subdomain_candidate(candidate: str, target_domain: str) -> str | 
 
 async def _fallback_subfinder(scan_id: int, target_domain: str, collector: ScanCollector):
     await broadcast(scan_id, "[*] Built-in subdomain discovery running in minimal mode")
+    status_code, body, _ = await http_request(
+        f"https://crt.sh/?q=%25.{target_domain}&output=json",
+        headers={"User-Agent": "Eartheye/1.0"},
+        timeout=20,
+    )
+    if status_code != 200 or not body:
+        await broadcast(scan_id, "[*] Certificate transparency lookup returned no data")
+        return
+
+    try:
+        payload = json.loads(body)
+    except json.JSONDecodeError:
+        await broadcast(scan_id, "[*] Certificate transparency lookup returned invalid JSON")
+        return
+
+    discovered: set[str] = set()
+    for entry in payload if isinstance(payload, list) else []:
+        for candidate in str(entry.get("name_value", "")).splitlines():
+            normalized = _normalize_subdomain_candidate(candidate, target_domain)
+            if normalized:
+                discovered.add(normalized)
+                if len(discovered) >= FALLBACK_MAX_SUBDOMAINS:
+                    break
+        if len(discovered) >= FALLBACK_MAX_SUBDOMAINS:
+            break
+
+    for subdomain in sorted(discovered):
+        collector.add_subdomain(subdomain, is_alive=False, source="crt.sh")
+
+    if discovered:
+        await broadcast(scan_id, f"[+] Built-in subdomain discovery collected {len(discovered)} entries from CT logs")
+    else:
+        await broadcast(scan_id, "[*] No subdomains found in CT logs for target scope")
 
 
 async def _fallback_gau(scan_id: int, target_domain: str, collector: ScanCollector):
@@ -711,7 +773,7 @@ async def run_httpx(scan_id: int, target_domain: str, output_dir: str, collector
 
 
 async def run_katana(scan_id: int, output_dir: str, collector: ScanCollector):
-    live_targets = [url for url, entry in collector.endpoints.items() if entry.get("source") == "httpx"]
+    live_targets = [url for url, entry in collector.endpoints.items() if entry.get("source") in {"httpx", "seed"}]
     if not live_targets:
         return
 
@@ -929,7 +991,7 @@ async def run_ffuf(scan_id: int, output_dir: str, collector: ScanCollector):
         {
             f"{urlparse(url).scheme}://{urlparse(url).netloc}"
             for url, entry in collector.endpoints.items()
-            if entry.get("source") == "httpx"
+            if entry.get("source") in {"httpx", "seed"}
         }
     )
     if not base_urls:
@@ -1023,9 +1085,12 @@ async def run_nuclei(scan_id: int, output_dir: str, collector: ScanCollector):
 def generate_report(target_domain: str, output_dir: str, collector: ScanCollector) -> str:
     report_path = os.path.join(output_dir, f"{target_domain}_full_recon.txt")
     summary = collector.summary()
+    tool_status = summary.get("tool_status") or {}
     lines = [
         f"Eartheye Recon Report - {target_domain}",
         f"Generated: {datetime.utcnow().isoformat()}Z",
+        f"Requested Target: {summary.get('requested_target', target_domain)}",
+        f"Discovery Root: {summary.get('scan_scope', collector.target_domain)}",
         "",
         "=== Summary ===",
         f"Subdomains: {summary['subdomains']}",
@@ -1034,6 +1099,9 @@ def generate_report(target_domain: str, output_dir: str, collector: ScanCollecto
         f"Vulnerabilities: {summary['vulnerabilities']}",
         f"Secrets: {summary['secrets']}",
         f"GraphQL Findings: {summary['graphql_findings']}",
+        "",
+        "=== Tool Status ===",
+        *([f"{tool}: {status}" for tool, status in tool_status.items()] or ["No tool diagnostics recorded"]),
         "",
         "=== Technologies ===",
         *(summary["technologies"] or ["None detected"]),
@@ -1096,22 +1164,44 @@ async def resolve_scan_user_role(scan_id: int, fallback_role: str | None) -> str
 
 async def run_scan(scan_id: int, target_domain: str, scan_type: str, user_role: str | None = None, monitoring_target_id: int | None = None):
     output_dir = os.path.join(SCANS_DIR, target_domain)
+    collector: ScanCollector | None = None
     try:
         ensure_output_dir(output_dir)
-        collector = ScanCollector(target_domain)
-        collector.add_endpoint(f"https://{target_domain}", source="seed")
-        collector.add_endpoint(f"http://{target_domain}", source="seed")
+        scope_domain = normalize_scan_scope(target_domain)
+        collector = ScanCollector(scope_domain)
+
+        seed_hosts = [target_domain]
+        if scope_domain != target_domain:
+            seed_hosts.append(scope_domain)
+        for host in seed_hosts:
+            collector.add_endpoint(f"https://{host}", source="seed")
+            collector.add_endpoint(f"http://{host}", source="seed")
 
         role = await resolve_scan_user_role(scan_id, user_role)
         features = features_for_scan(role, scan_type)
+        tool_status = await resolve_tool_status(features)
+        collector.metadata.update(
+            {
+                "requested_target": target_domain,
+                "scan_scope": scope_domain,
+                "tool_status": tool_status,
+                "missing_tools": [tool for tool, status in tool_status.items() if status == "missing"],
+                "fallback_tools": [tool for tool, status in tool_status.items() if str(status).startswith("fallback-")],
+            }
+        )
 
         await update_scan_status(scan_id, "Running", output_dir=output_dir)
-        await broadcast(scan_id, f"[*] Starting {scan_type} on {target_domain} ({role} tier)")
+        scope_note = f" | discovery root: {scope_domain}" if scope_domain != target_domain else ""
+        await broadcast(scan_id, f"[*] Starting {scan_type} on {target_domain} ({role} tier){scope_note}")
 
-        await run_subfinder(scan_id, target_domain, output_dir, collector)
+        missing_tools = collector.metadata.get("missing_tools") or []
+        if missing_tools:
+            await broadcast(scan_id, f"[*] Missing external tools: {', '.join(missing_tools)}")
+
+        await run_subfinder(scan_id, scope_domain, output_dir, collector)
         collector.write_files(output_dir)
 
-        await run_httpx(scan_id, target_domain, output_dir, collector)
+        await run_httpx(scan_id, scope_domain, output_dir, collector)
         collector.write_files(output_dir)
 
         if "katana" in features:
@@ -1119,7 +1209,7 @@ async def run_scan(scan_id: int, target_domain: str, scan_type: str, user_role: 
             collector.write_files(output_dir)
 
         if "gau" in features:
-            await run_gau(scan_id, target_domain, output_dir, collector)
+            await run_gau(scan_id, scope_domain, output_dir, collector)
             collector.write_files(output_dir)
 
         if "javascript_intelligence" in features:
@@ -1155,7 +1245,10 @@ async def run_scan(scan_id: int, target_domain: str, scan_type: str, user_role: 
         import traceback
         error_detail = f"{type(exc).__name__}: {exc}"
         error_trace = traceback.format_exc()
-        await update_scan_status(scan_id, "Failed", output_dir=output_dir, summary={"error": error_detail, "trace": error_trace})
+        failure_summary = {"error": error_detail, "trace": error_trace}
+        if collector is not None and collector.metadata:
+            failure_summary.update(collector.metadata)
+        await update_scan_status(scan_id, "Failed", output_dir=output_dir, summary=failure_summary)
         await broadcast(scan_id, f"[-] Scan failed: {error_detail}")
 
 
