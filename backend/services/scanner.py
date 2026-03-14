@@ -1093,18 +1093,18 @@ async def resolve_scan_user_role(scan_id: int, fallback_role: str | None) -> str
 
 async def run_scan(scan_id: int, target_domain: str, scan_type: str, user_role: str | None = None, monitoring_target_id: int | None = None):
     output_dir = os.path.join(SCANS_DIR, target_domain)
-    ensure_output_dir(output_dir)
-    collector = ScanCollector(target_domain)
-    collector.add_endpoint(f"https://{target_domain}", source="seed")
-    collector.add_endpoint(f"http://{target_domain}", source="seed")
-
-    role = await resolve_scan_user_role(scan_id, user_role)
-    features = features_for_scan(role, scan_type)
-
-    await update_scan_status(scan_id, "Running", output_dir=output_dir)
-    await broadcast(scan_id, f"[*] Starting {scan_type} on {target_domain} ({role} tier)")
-
     try:
+        ensure_output_dir(output_dir)
+        collector = ScanCollector(target_domain)
+        collector.add_endpoint(f"https://{target_domain}", source="seed")
+        collector.add_endpoint(f"http://{target_domain}", source="seed")
+
+        role = await resolve_scan_user_role(scan_id, user_role)
+        features = features_for_scan(role, scan_type)
+
+        await update_scan_status(scan_id, "Running", output_dir=output_dir)
+        await broadcast(scan_id, f"[*] Starting {scan_type} on {target_domain} ({role} tier)")
+
         await run_subfinder(scan_id, target_domain, output_dir, collector)
         collector.write_files(output_dir)
 

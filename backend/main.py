@@ -1,5 +1,6 @@
 import asyncio
 import os
+from datetime import datetime
 
 from fastapi import FastAPI, Depends, HTTPException, Request, status
 from fastapi.middleware.cors import CORSMiddleware
@@ -119,6 +120,19 @@ async def startup():
         await db.commit()
 
     automation_worker.start()
+
+    # Mark any scans that were left in Pending/Running (from a previous crash) as Failed
+    async with AsyncSessionLocal() as db:
+        result = await db.execute(
+            select(Scan).where(Scan.status.in_(["Pending", "Running"]))
+        )
+        stale_scans = result.scalars().all()
+        for scan in stale_scans:
+            scan.status = "Failed"
+            scan.completed_at = datetime.utcnow()
+        if stale_scans:
+            await db.commit()
+            print(f"[startup] Marked {len(stale_scans)} stale scan(s) as Failed")
 
 
 @app.on_event("shutdown")
