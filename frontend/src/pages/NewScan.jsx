@@ -42,6 +42,8 @@ export default function NewScan() {
   const [automationTargets, setAutomationTargets] = useState([]);
   const [automationLoading, setAutomationLoading] = useState(false);
   const wsRef = useRef(null);
+  const scanStatusPollRef = useRef(null);
+  const scanStatusPollingActiveRef = useRef(false);
   const loadingRef = useRef(false);
 
   const premiumAccess = isPremiumRole(user?.role);
@@ -72,6 +74,7 @@ export default function NewScan() {
 
   useEffect(() => {
     return () => {
+      stopScanStatusPolling();
       if (wsRef.current) {
         wsRef.current.onopen = null;
         wsRef.current.onmessage = null;
@@ -83,6 +86,44 @@ export default function NewScan() {
   }, []);
 
   const appendLog = (message) => setLogs((prev) => [...prev, message]);
+
+  const stopScanStatusPolling = () => {
+    if (scanStatusPollRef.current) {
+      clearInterval(scanStatusPollRef.current);
+      scanStatusPollRef.current = null;
+    }
+    scanStatusPollingActiveRef.current = false;
+  };
+
+  const startScanStatusPolling = (scanId, fallbackMessage) => {
+    if (scanStatusPollingActiveRef.current) return;
+    scanStatusPollingActiveRef.current = true;
+
+    if (fallbackMessage) {
+      appendLog(fallbackMessage);
+    }
+
+    const pollStatus = async () => {
+      try {
+        const res = await axios.get(`${API_URL}/scans/${scanId}`);
+        const status = res.data?.status;
+        if (status === 'Completed') {
+          appendLog('[SYSTEM] Scan completed. Open full report for details.');
+          setIsLoading(false);
+          stopScanStatusPolling();
+        } else if (status === 'Failed') {
+          appendLog('[SYSTEM] Scan failed. Open full report for details.');
+          setIsLoading(false);
+          stopScanStatusPolling();
+        }
+      } catch (err) {
+        console.error(err);
+      }
+    };
+
+    pollStatus();
+    scanStatusPollRef.current = setInterval(pollStatus, 3000);
+  };
 
   const fetchAutomationTargets = async () => {
     try {
@@ -101,6 +142,7 @@ export default function NewScan() {
       return;
     }
 
+  stopScanStatusPolling();
     setIsLoading(true);
     setLogs([]);
     try {
@@ -115,6 +157,7 @@ export default function NewScan() {
     } catch (err) {
       console.error(err);
       appendLog(`[ERROR] Failed to initialize scan: ${err.response?.data?.detail || err.message}`);
+      stopScanStatusPolling();
       setIsLoading(false);
     }
   };
@@ -130,6 +173,13 @@ export default function NewScan() {
 
     const socket = new WebSocket(buildWebSocketUrl(`/ws/scan/${scanId}`));
     let socketComplete = false;
+    let fallbackActivated = false;
+
+    const activateFallback = (message) => {
+      if (fallbackActivated) return;
+      fallbackActivated = true;
+      startScanStatusPolling(scanId, message);
+    };
     
     socket.onopen = () => appendLog('[SYSTEM] Secure neural link established. Waiting for scanner engine...');
     
@@ -137,22 +187,23 @@ export default function NewScan() {
       appendLog(event.data);
       if (event.data.includes('Results saved to database') || event.data.includes('Scan failed')) {
         socketComplete = true;
+        stopScanStatusPolling();
         setIsLoading(false);
       }
     };
     
     socket.onerror = () => {
       if (wsRef.current !== socket) return;
-      appendLog('[ERROR] WebSocket connection failed.');
-      setIsLoading(false);
+      activateFallback('[SYSTEM] Live telemetry channel unavailable. Continuing with status polling...');
     };
 
     socket.onclose = () => {
       if (wsRef.current !== socket) return;
       if (loadingRef.current && !socketComplete) {
-        appendLog('[SYSTEM] Connection terminated unexpectedly.');
+        activateFallback('[SYSTEM] Live telemetry disconnected. Continuing with status polling...');
+      } else {
+        stopScanStatusPolling();
       }
-      setIsLoading(false);
     };
 
     wsRef.current = socket;
