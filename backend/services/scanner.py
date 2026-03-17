@@ -607,7 +607,8 @@ async def _check_go_httpx() -> bool:
 
     The Python httpx package also installs an 'httpx' entry-point that accepts
     completely different flags; running it with ProjectDiscovery flags silently
-    fails.  We verify by checking the -version output.
+    fails.  We verify by checking version output first, then fall back to
+    inspecting the binary's ELF magic bytes (compiled Go binary vs Python script).
     """
     global _GO_HTTPX_AVAILABLE
     if _GO_HTTPX_AVAILABLE is not None:
@@ -616,17 +617,33 @@ async def _check_go_httpx() -> bool:
         _GO_HTTPX_AVAILABLE = False
         return False
     try:
-        proc = await asyncio.create_subprocess_exec(
-            "httpx", "-version",
-            stdout=asyncio.subprocess.PIPE,
-            stderr=asyncio.subprocess.STDOUT,
-        )
-        stdout, _ = await asyncio.wait_for(proc.communicate(), timeout=5)
-        output = stdout.decode("utf-8", errors="replace").lower()
-        # Go httpx prints e.g. "Current Version: v1.x.x" and mentions projectdiscovery
-        _GO_HTTPX_AVAILABLE = "projectdiscovery" in output or (
-            "current version" in output and "python" not in output
-        )
+        # Try both -version and --version (flag varies across releases)
+        for flag in ("-version", "--version"):
+            proc = await asyncio.create_subprocess_exec(
+                "httpx", flag,
+                stdout=asyncio.subprocess.PIPE,
+                stderr=asyncio.subprocess.STDOUT,
+            )
+            stdout, _ = await asyncio.wait_for(proc.communicate(), timeout=5)
+            output = stdout.decode("utf-8", errors="replace").lower()
+            if "projectdiscovery" in output or (
+                "current version" in output and "python" not in output
+            ):
+                _GO_HTTPX_AVAILABLE = True
+                return True
+
+        # Version flags gave no useful output — check ELF magic.
+        # A compiled Go binary starts with 0x7f 'E' 'L' 'F'; a Python script
+        # starts with '#!' or is plain text.
+        httpx_path = shutil.which("httpx")
+        if httpx_path:
+            with open(httpx_path, "rb") as fh:
+                magic = fh.read(4)
+            if magic == b"\x7fELF":
+                _GO_HTTPX_AVAILABLE = True
+                return True
+
+        _GO_HTTPX_AVAILABLE = False
     except Exception:
         _GO_HTTPX_AVAILABLE = False
     return _GO_HTTPX_AVAILABLE
