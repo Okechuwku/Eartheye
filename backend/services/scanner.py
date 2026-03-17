@@ -451,8 +451,10 @@ async def resolve_tool_status(features: set[str]) -> dict[str, str]:
 
 async def broadcast(scan_id: int, message: str):
     timestamp = datetime.utcnow().strftime("%H:%M:%S")
+    formatted_message = f"[{timestamp}] {message}"
+    print(f"[scan {scan_id}] {formatted_message}", flush=True)
     try:
-        await manager.broadcast_log(scan_id, f"[{timestamp}] {message}")
+        await manager.broadcast_log(scan_id, formatted_message)
     except Exception:
         pass  # telemetry failures must never abort the scan
 

@@ -44,6 +44,7 @@ export default function NewScan() {
   const wsRef = useRef(null);
   const scanStatusPollRef = useRef(null);
   const scanStatusPollingActiveRef = useRef(false);
+  const backendLogCountRef = useRef(0);
   const loadingRef = useRef(false);
 
   const premiumAccess = isPremiumRole(user?.role);
@@ -87,6 +88,11 @@ export default function NewScan() {
 
   const appendLog = (message) => setLogs((prev) => [...prev, message]);
 
+  const appendBackendLog = (message) => {
+    backendLogCountRef.current += 1;
+    appendLog(message);
+  };
+
   const stopScanStatusPolling = () => {
     if (scanStatusPollRef.current) {
       clearInterval(scanStatusPollRef.current);
@@ -105,14 +111,22 @@ export default function NewScan() {
 
     const pollStatus = async () => {
       try {
-        const res = await axios.get(`${API_URL}/scans/${scanId}`);
-        const status = res.data?.status;
+        const [scanRes, logsRes] = await Promise.all([
+          axios.get(`${API_URL}/scans/${scanId}`),
+          axios.get(`${API_URL}/scans/${scanId}/logs`),
+        ]);
+
+        const history = logsRes.data?.logs || [];
+        const unseenLogs = history.slice(backendLogCountRef.current);
+        unseenLogs.forEach((line) => appendBackendLog(line));
+
+        const status = scanRes.data?.status;
         if (status === 'Completed') {
           appendLog('[SYSTEM] Scan completed. Open full report for details.');
           setIsLoading(false);
           stopScanStatusPolling();
         } else if (status === 'Failed') {
-          const errorMsg = res.data?.summary?.error;
+          const errorMsg = scanRes.data?.summary?.error;
           appendLog(errorMsg
             ? `[ERROR] Scan failed: ${errorMsg}`
             : '[SYSTEM] Scan failed. Open full report for details.');
@@ -145,7 +159,8 @@ export default function NewScan() {
       return;
     }
 
-  stopScanStatusPolling();
+    stopScanStatusPolling();
+    backendLogCountRef.current = 0;
     setIsLoading(true);
     setLogs([]);
     try {
@@ -187,7 +202,7 @@ export default function NewScan() {
     socket.onopen = () => appendLog('[SYSTEM] Secure neural link established. Waiting for scanner engine...');
     
     socket.onmessage = (event) => {
-      appendLog(event.data);
+      appendBackendLog(event.data);
       if (event.data.includes('Results saved to database') || event.data.includes('Scan failed')) {
         socketComplete = true;
         stopScanStatusPolling();

@@ -25,6 +25,7 @@ from backend.models import (
     Vulnerability,
 )
 from backend import schemas, auth
+from backend.routers.websockets import manager
 from backend.services.scanner import trigger_scan_task
 from backend.services.subscriptions import can_manage_automation, can_run_scan, is_admin_role, normalize_role
 
@@ -144,6 +145,17 @@ async def get_scan(scan_id: int, current_user: User = Depends(auth.get_current_u
         raise HTTPException(status_code=404, detail="Scan not found")
     ensure_scan_access(scan, current_user)
     return scan
+
+
+@router.get("/{scan_id}/logs")
+async def get_scan_logs(scan_id: int, current_user: User = Depends(auth.get_current_user), db: AsyncSession = Depends(get_db)):
+    result = await db.execute(select(Scan).where(Scan.id == scan_id))
+    scan = result.scalars().first()
+    if not scan:
+        raise HTTPException(status_code=404, detail="Scan not found")
+    ensure_scan_access(scan, current_user)
+    logs = manager.log_history.get(scan_id, [])
+    return {"logs": logs, "count": len(logs)}
 
 
 @router.get("/{scan_id}/results", response_model=schemas.ScanResultsResponse)
