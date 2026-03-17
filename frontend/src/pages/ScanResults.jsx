@@ -2,7 +2,7 @@ import React, { useEffect, useState } from 'react';
 import { useParams } from 'react-router-dom';
 import ForceGraph2D from 'react-force-graph-2d';
 import axios from 'axios';
-import { Download, FileWarning, KeyRound, Radar, Server, ShieldAlert } from 'lucide-react';
+import { AlertTriangle, Download, FileWarning, KeyRound, Radar, ScanSearch, Server, ShieldAlert, Wrench } from 'lucide-react';
 import { API_BASE_URL, API_URL } from '../config/api.js';
 
 const emptyGraph = { nodes: [], links: [] };
@@ -64,6 +64,14 @@ export default function ScanResults() {
 
   const { scan, summary, subdomains, endpoints, directories, vulnerabilities, secrets, graphql_findings: graphqlFindings, report_download_url: reportDownloadUrl } = results;
   const technologies = summary?.technologies || [];
+  const toolStatus = summary?.tool_status || {};
+  const toolPaths = summary?.tool_paths || {};
+  const requestedTarget = summary?.requested_target || scan.target_domain;
+  const discoveryRoot = summary?.scan_scope || scan.target_domain;
+  const missingTools = summary?.missing_tools || [];
+  const fallbackTools = summary?.fallback_tools || [];
+  const scanError = summary?.error || null;
+  const graphWidth = typeof window !== 'undefined' ? Math.max(280, window.innerWidth - 120) : 900;
 
   return (
     <div className="w-full max-w-7xl mx-auto py-4 space-y-6">
@@ -102,6 +110,41 @@ export default function ScanResults() {
         <SummaryCard title="GraphQL" value={summary?.graphql_findings || 0} color="text-cyber-blue" />
       </div>
 
+      <div className="grid grid-cols-1 xl:grid-cols-3 gap-6">
+        <Panel
+          title="Scan Scope"
+          icon={<ScanSearch className="w-4 h-4 text-cyber-blue" />}
+          emptyLabel="No scope metadata recorded."
+          items={[
+            { id: 'requested-target', primary: requestedTarget, secondary: 'Requested target', accent: 'target' },
+            { id: 'discovery-root', primary: discoveryRoot, secondary: 'Discovery root', accent: 'scope' },
+          ]}
+        />
+
+        <Panel
+          title="Tool Status"
+          icon={<Wrench className="w-4 h-4 text-cyber-purple" />}
+          emptyLabel="No tool diagnostics recorded."
+          items={Object.entries(toolStatus).map(([tool, status]) => ({
+            id: tool,
+            primary: tool,
+            secondary: toolPaths[tool] || 'Path unavailable',
+            accent: status,
+          }))}
+        />
+
+        <Panel
+          title="Runtime Signals"
+          icon={<AlertTriangle className="w-4 h-4 text-cyber-pink" />}
+          emptyLabel="No runtime warnings recorded."
+          items={[
+            ...missingTools.map((tool) => ({ id: `missing-${tool}`, primary: tool, secondary: 'Missing external tool', accent: 'missing' })),
+            ...fallbackTools.map((tool) => ({ id: `fallback-${tool}`, primary: tool, secondary: 'Fallback mode active', accent: 'fallback' })),
+            ...(scanError ? [{ id: 'scan-error', primary: scanError, secondary: 'Last scan error', accent: 'error' }] : []),
+          ]}
+        />
+      </div>
+
       <div className="glass-panel rounded-lg overflow-hidden border border-cyber-blue/20 relative px-4 h-[520px]">
         <div className="absolute top-4 left-4 z-10 glass-panel p-4 rounded text-xs font-mono space-y-2 max-w-xs">
           <div className="flex items-center gap-2"><span className="w-3 h-3 rounded-full bg-cyber-blue"></span> root domain</div>
@@ -126,7 +169,7 @@ export default function ScanResults() {
           linkColor={() => 'rgba(143, 159, 178, 0.4)'}
           linkWidth={1}
           backgroundColor="rgba(10, 10, 15, 0)" // transparent blending
-          width={window.innerWidth - 120}
+          width={graphWidth}
           height={520}
         />
       </div>

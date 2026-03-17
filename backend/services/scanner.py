@@ -55,6 +55,20 @@ SECRET_PATTERNS = [
     ),
 ]
 
+TOOL_SEARCH_DIRS = [
+    path
+    for path in [
+        "/usr/local/bin",
+        "/usr/bin",
+        "/bin",
+        "/snap/bin",
+        os.path.expanduser("~/.local/bin"),
+        os.path.expanduser("~/go/bin"),
+        "/home/azureuser/go/bin",
+    ]
+    if path
+]
+
 
 class ScanCollector:
     def __init__(self, target_domain: str):
@@ -375,8 +389,39 @@ def find_best_endpoint(endpoints: dict[str, dict], matched: str | None) -> str |
     return None
 
 
+def build_tool_env() -> dict[str, str]:
+    env = os.environ.copy()
+    path_entries: list[str] = []
+    seen: set[str] = set()
+    for entry in TOOL_SEARCH_DIRS + env.get("PATH", "").split(os.pathsep):
+        value = (entry or "").strip()
+        if not value or value in seen:
+            continue
+        seen.add(value)
+        path_entries.append(value)
+    env["PATH"] = os.pathsep.join(path_entries)
+    return env
+
+
+def resolve_command_path(command: str) -> str | None:
+    if not command:
+        return None
+    if os.path.isabs(command):
+        return command if os.path.exists(command) and os.access(command, os.X_OK) else None
+    return shutil.which(command, path=build_tool_env().get("PATH", ""))
+
+
 def command_exists(command: str) -> bool:
-    return shutil.which(command) is not None
+    return resolve_command_path(command) is not None
+
+
+def collect_tool_paths(tool_names: list[str]) -> dict[str, str]:
+    resolved: dict[str, str] = {}
+    for tool_name in tool_names:
+        tool_path = resolve_command_path(tool_name)
+        if tool_path:
+            resolved[tool_name] = tool_path
+    return resolved
 
 
 def normalize_scan_scope(target_domain: str) -> str:
@@ -413,12 +458,18 @@ async def broadcast(scan_id: int, message: str):
 
 
 async def run_cmd_with_logs(scan_id: int, cmd: list[str], cwd: str, output_file: str | None = None) -> int:
+    resolved_binary = resolve_command_path(cmd[0])
+    if not resolved_binary:
+        await broadcast(scan_id, f"[-] Tool unavailable: {cmd[0]}")
+        return 127
+    resolved_cmd = [resolved_binary, *cmd[1:]]
     try:
         process = await asyncio.create_subprocess_exec(
-            *cmd,
+            *resolved_cmd,
             stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.STDOUT,
             cwd=cwd,
+            env=build_tool_env(),
         )
     except FileNotFoundError:
         await broadcast(scan_id, f"[-] Tool unavailable: {cmd[0]}")
@@ -613,16 +664,18 @@ async def _check_go_httpx() -> bool:
     global _GO_HTTPX_AVAILABLE
     if _GO_HTTPX_AVAILABLE is not None:
         return _GO_HTTPX_AVAILABLE
-    if not command_exists("httpx"):
+    httpx_path = resolve_command_path("httpx")
+    if not httpx_path:
         _GO_HTTPX_AVAILABLE = False
         return False
     try:
         # Try both -version and --version (flag varies across releases)
         for flag in ("-version", "--version"):
             proc = await asyncio.create_subprocess_exec(
-                "httpx", flag,
+                httpx_path, flag,
                 stdout=asyncio.subprocess.PIPE,
                 stderr=asyncio.subprocess.STDOUT,
+                env=build_tool_env(),
             )
             stdout, _ = await asyncio.wait_for(proc.communicate(), timeout=5)
             output = stdout.decode("utf-8", errors="replace").lower()
@@ -635,7 +688,6 @@ async def _check_go_httpx() -> bool:
         # Version flags gave no useful output — check ELF magic.
         # A compiled Go binary starts with 0x7f 'E' 'L' 'F'; a Python script
         # starts with '#!' or is plain text.
-        httpx_path = shutil.which("httpx")
         if httpx_path:
             with open(httpx_path, "rb") as fh:
                 magic = fh.read(4)
@@ -1103,6 +1155,7 @@ def generate_report(target_domain: str, output_dir: str, collector: ScanCollecto
     report_path = os.path.join(output_dir, f"{target_domain}_full_recon.txt")
     summary = collector.summary()
     tool_status = summary.get("tool_status") or {}
+    tool_paths = summary.get("tool_paths") or {}
     lines = [
         f"Eartheye Recon Report - {target_domain}",
         f"Generated: {datetime.utcnow().isoformat()}Z",
@@ -1119,6 +1172,9 @@ def generate_report(target_domain: str, output_dir: str, collector: ScanCollecto
         "",
         "=== Tool Status ===",
         *([f"{tool}: {status}" for tool, status in tool_status.items()] or ["No tool diagnostics recorded"]),
+        "",
+        "=== Tool Paths ===",
+        *([f"{tool}: {path}" for tool, path in tool_paths.items()] or ["No tool paths resolved"]),
         "",
         "=== Technologies ===",
         *(summary["technologies"] or ["None detected"]),
@@ -1197,11 +1253,13 @@ async def run_scan(scan_id: int, target_domain: str, scan_type: str, user_role: 
         role = await resolve_scan_user_role(scan_id, user_role)
         features = features_for_scan(role, scan_type)
         tool_status = await resolve_tool_status(features)
+        tool_paths = collect_tool_paths(["subfinder", "httpx", "katana", "gau", "linkfinder", "ffuf", "nuclei"])
         collector.metadata.update(
             {
                 "requested_target": target_domain,
                 "scan_scope": scope_domain,
                 "tool_status": tool_status,
+                "tool_paths": tool_paths,
                 "missing_tools": [tool for tool, status in tool_status.items() if status == "missing"],
                 "fallback_tools": [tool for tool, status in tool_status.items() if str(status).startswith("fallback-")],
             }
