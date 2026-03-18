@@ -40,6 +40,10 @@ GRAPHQL_PATHS = ["/graphql", "/api/graphql", "/query"]
 INTROSPECTION_QUERY = "query IntrospectionQuery { __schema { types { name } queryType { name } mutationType { name } } }"
 FALLBACK_MAX_SUBDOMAINS = 250
 FALLBACK_MAX_URLS = 300
+MAX_SUBFINDER_RESULTS = int(os.getenv("MAX_SUBFINDER_RESULTS", "800"))
+MAX_HTTPX_TARGETS = int(os.getenv("MAX_HTTPX_TARGETS", "600"))
+HTTPX_TIMEOUT_SECONDS = int(os.getenv("HTTPX_TIMEOUT_SECONDS", "8"))
+HTTPX_MAX_RUNTIME_SECONDS = int(os.getenv("HTTPX_MAX_RUNTIME_SECONDS", "600"))
 
 ROUTE_PATTERN = re.compile(r"[\"']((?:https?://[^\"'\s]+|/(?:[A-Za-z0-9_\-./?=&:{}]+)))[\"']")
 PLACEHOLDER_PATTERN = re.compile(r"[:{]([A-Za-z0-9_\-]{2,64})[}]?")
@@ -459,7 +463,13 @@ async def broadcast(scan_id: int, message: str):
         pass  # telemetry failures must never abort the scan
 
 
-async def run_cmd_with_logs(scan_id: int, cmd: list[str], cwd: str, output_file: str | None = None) -> int:
+async def run_cmd_with_logs(
+    scan_id: int,
+    cmd: list[str],
+    cwd: str,
+    output_file: str | None = None,
+    timeout_seconds: int | None = None,
+) -> int:
     resolved_binary = resolve_command_path(cmd[0])
     if not resolved_binary:
         await broadcast(scan_id, f"[-] Tool unavailable: {cmd[0]}")
@@ -478,14 +488,38 @@ async def run_cmd_with_logs(scan_id: int, cmd: list[str], cwd: str, output_file:
         return 127
 
     captured_lines = []
+    loop = asyncio.get_running_loop()
+    started_at = loop.time()
+    last_heartbeat = started_at
     while True:
-        line = await process.stdout.readline()
+        now = loop.time()
+        if timeout_seconds and (now - started_at) > timeout_seconds:
+            process.kill()
+            await process.wait()
+            await broadcast(scan_id, f"[-] {cmd[0]} timed out after {timeout_seconds}s; continuing with collected output")
+            if output_file and captured_lines:
+                with open(output_file, "w", encoding="utf-8") as handle:
+                    handle.write("\n".join(captured_lines))
+                    handle.write("\n")
+            return 124
+
+        try:
+            line = await asyncio.wait_for(process.stdout.readline(), timeout=1.0)
+        except asyncio.TimeoutError:
+            if process.returncode is not None:
+                break
+            if (now - last_heartbeat) >= 20:
+                await broadcast(scan_id, f"[*] {cmd[0]} still running...")
+                last_heartbeat = now
+            continue
+
         if not line:
             break
         decoded_line = line.decode("utf-8", errors="replace").strip()
         if decoded_line:
             captured_lines.append(decoded_line)
             await broadcast(scan_id, decoded_line)
+            last_heartbeat = loop.time()
 
     await process.wait()
 
@@ -788,12 +822,28 @@ async def run_subfinder(scan_id: int, target_domain: str, output_dir: str, colle
         await _fallback_subfinder(scan_id, target_domain, collector)
 
     if os.path.exists(output_file):
+        discovered_count = 0
+        preview_limit = 30
         with open(output_file, "r", encoding="utf-8") as handle:
             for line in handle:
                 subdomain = line.strip()
                 if subdomain:
                     collector.add_subdomain(subdomain, is_alive=False, source="subfinder")
-                    await broadcast(scan_id, f"[+] Found {subdomain}")
+                    discovered_count += 1
+                    if discovered_count <= preview_limit:
+                        await broadcast(scan_id, f"[+] Found {subdomain}")
+                    elif discovered_count % 100 == 0:
+                        await broadcast(scan_id, f"[+] Subfinder progress: {discovered_count} subdomains discovered")
+
+                    if discovered_count >= MAX_SUBFINDER_RESULTS:
+                        await broadcast(
+                            scan_id,
+                            f"[*] Subfinder result cap reached ({MAX_SUBFINDER_RESULTS}); trimming for downstream stages",
+                        )
+                        break
+
+        write_lines(output_file, list(collector.subdomains.keys()))
+        await broadcast(scan_id, f"[+] Subfinder collected {len(collector.subdomains)} unique subdomains for analysis")
 
 
 async def run_httpx(scan_id: int, target_domain: str, output_dir: str, collector: ScanCollector):
@@ -801,15 +851,56 @@ async def run_httpx(scan_id: int, target_domain: str, output_dir: str, collector
     inputs_file = os.path.join(output_dir, "subdomains.txt")
     await broadcast(scan_id, "[+] Running httpx")
 
+    input_targets: list[str] = []
+    if os.path.exists(inputs_file):
+        with open(inputs_file, "r", encoding="utf-8") as handle:
+            input_targets = sorted({line.strip() for line in handle if line.strip()})
+
+    if input_targets and len(input_targets) > MAX_HTTPX_TARGETS:
+        await broadcast(
+            scan_id,
+            f"[*] httpx target set reduced from {len(input_targets)} to {MAX_HTTPX_TARGETS} for runtime safety",
+        )
+        input_targets = input_targets[:MAX_HTTPX_TARGETS]
+        write_lines(inputs_file, input_targets)
+
+    await broadcast(scan_id, f"[*] httpx probing {len(input_targets) if input_targets else 1} target(s)")
+
     if await _check_go_httpx():
-        cmd = ["httpx", "-silent", "-json", "-title", "-tech-detect", "-status-code", "-o", httpx_raw]
-        if os.path.exists(inputs_file) and os.path.getsize(inputs_file) > 0:
+        cmd = [
+            "httpx",
+            "-silent",
+            "-json",
+            "-title",
+            "-tech-detect",
+            "-status-code",
+            "-timeout",
+            str(HTTPX_TIMEOUT_SECONDS),
+            "-retries",
+            "1",
+            "-threads",
+            "50",
+            "-o",
+            httpx_raw,
+        ]
+        if input_targets:
             cmd.extend(["-l", inputs_file])
         else:
             cmd.extend(["-u", target_domain])
-        await run_cmd_with_logs(scan_id, cmd, output_dir)
+        exit_code = await run_cmd_with_logs(
+            scan_id,
+            cmd,
+            output_dir,
+            timeout_seconds=HTTPX_MAX_RUNTIME_SECONDS,
+        )
+        if exit_code == 124:
+            await broadcast(scan_id, f"[*] httpx reached runtime budget ({HTTPX_MAX_RUNTIME_SECONDS}s); using partial output")
     else:
         await broadcast(scan_id, "[*] httpx (Go) not found in PATH; using native HTTP probe")
+        await _probe_http_native(scan_id, target_domain, collector)
+
+    if not os.path.exists(httpx_raw):
+        await broadcast(scan_id, "[*] httpx produced no JSON output; falling back to native probe")
         await _probe_http_native(scan_id, target_domain, collector)
 
     if os.path.exists(httpx_raw):

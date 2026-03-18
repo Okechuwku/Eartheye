@@ -212,13 +212,13 @@ export default function NewScan() {
     
     socket.onerror = () => {
       if (wsRef.current !== socket) return;
-      activateFallback('[SYSTEM] Live telemetry channel unavailable. Continuing with status polling...');
+      activateFallback('[SYSTEM] Live telemetry switched to polling mode.');
     };
 
     socket.onclose = () => {
       if (wsRef.current !== socket) return;
       if (loadingRef.current && !socketComplete) {
-        activateFallback('[SYSTEM] Live telemetry disconnected. Continuing with status polling...');
+        activateFallback('[SYSTEM] Live telemetry disconnected. Polling mode active.');
       } else {
         stopScanStatusPolling();
       }
