@@ -98,8 +98,6 @@ I enjoy mapping attack surfaces, testing real applications, and validating findi
 
 This training strengthened my foundations in cybersecurity concepts, recon discipline, vulnerability identification, and security testing workflow. It also reinforced a core habit I value highly: **validate first, report second**.
 
-> If the PDF is not yet in the repo, place it at `certificates/cybersecurity_certificate.pdf` so the link resolves cleanly on GitHub.
-
 ---
 
 ## 🧠 Practical Experience
