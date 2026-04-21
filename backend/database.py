@@ -5,9 +5,8 @@ from dotenv import load_dotenv
 from sqlalchemy.ext.asyncio import create_async_engine, AsyncSession
 from sqlalchemy.orm import declarative_base, sessionmaker
 
-# Resolve to repo root (.env lives alongside backend/)
-_ENV_FILE = Path(__file__).resolve().parent.parent / ".env"
-load_dotenv(_ENV_FILE)
+# Update with your actual PostgreSQL credentials
+SQLALCHEMY_DATABASE_URL = "postgresql+asyncpg://postgres:Scientist44%40.@localhost/eartheye"
 
 DEFAULT_DATABASE_URL = "postgresql+asyncpg://postgres:postgres@localhost/eartheye"
 SQLALCHEMY_DATABASE_URL = os.getenv("DATABASE_URL", DEFAULT_DATABASE_URL)

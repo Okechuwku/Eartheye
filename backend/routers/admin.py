@@ -1,19 +1,16 @@
-import os
-import shutil
-
-from fastapi import APIRouter, Depends, HTTPException
-from fastapi.responses import FileResponse
+from fastapi import APIRouter, Depends, HTTPException, status
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.future import select
-from sqlalchemy import func, delete
+from sqlalchemy import func
 from typing import List
 
 from backend.database import get_db
-from backend.models import GraphQLFinding, MonitoringTarget, Scan, SecretFinding, User, Vulnerability, Directory, Endpoint, Subdomain
+from backend.models import User, Scan, Vulnerability
 from backend import schemas, auth
-from backend.services.subscriptions import normalize_role, subscription_plan_for_role
+import logging
 
 router = APIRouter(prefix="/api/admin", tags=["admin"])
+logger = logging.getLogger("admin_audit")
 
 
 @router.get("/overview", response_model=schemas.AdminOverviewResponse)
@@ -40,13 +37,63 @@ async def admin_overview(admin: User = Depends(auth.get_current_admin), db: Asyn
 
 @router.get("/users", response_model=List[schemas.UserResponse])
 async def list_all_users(admin: User = Depends(auth.get_current_admin), db: AsyncSession = Depends(get_db)):
-    result = await db.execute(select(User))
-    users = result.scalars().all()
-    for user in users:
-        user.role = normalize_role(user.role)
-        user.subscription_plan = subscription_plan_for_role(user.role)
-        user.subscription_status = user.subscription_status or "active"
-    return users
+    result = await db.execute(select(User).order_by(User.id))
+    return result.scalars().all()
+
+
+@router.patch("/users/{user_id}/tier", response_model=schemas.UserResponse)
+async def update_user_tier(
+    user_id: int, 
+    update: schemas.UserTierUpdate, 
+    admin: User = Depends(auth.get_current_admin), 
+    db: AsyncSession = Depends(get_db)
+):
+    if update.subscription_tier not in ["Free", "Premium"]:
+        raise HTTPException(status_code=400, detail="Invalid tier. Must be Free or Premium")
+
+    result = await db.execute(select(User).where(User.id == user_id))
+    user = result.scalars().first()
+    if not user:
+        raise HTTPException(status_code=404, detail="User not found")
+        
+    old_tier = user.subscription_tier
+    user.subscription_tier = update.subscription_tier
+    await db.commit()
+    await db.refresh(user)
+    
+    # Audit log
+    logger.warning(f"AUDIT | Admin {admin.email} changed tier for {user.email}: {old_tier} -> {user.subscription_tier}")
+    
+    return user
+
+
+@router.patch("/users/{user_id}/role", response_model=schemas.UserResponse)
+async def update_user_role(
+    user_id: int, 
+    update: schemas.UserRoleUpdate, 
+    admin: User = Depends(auth.get_current_admin), 
+    db: AsyncSession = Depends(get_db)
+):
+    if update.role not in ["Admin", "User"]:
+        raise HTTPException(status_code=400, detail="Invalid role. Must be Admin or User")
+
+    if user_id == admin.id and update.role == "User":
+        raise HTTPException(status_code=400, detail="Cannot demote yourself.")
+
+    result = await db.execute(select(User).where(User.id == user_id))
+    user = result.scalars().first()
+    if not user:
+        raise HTTPException(status_code=404, detail="User not found")
+        
+    old_role = user.role
+    user.role = update.role
+    await db.commit()
+    await db.refresh(user)
+    
+    logger.warning(f"AUDIT | Admin {admin.email} changed role for {user.email}: {old_role} -> {user.role}")
+    
+    return user
+
 
 @router.get("/scans", response_model=List[schemas.ScanResponse])
 async def list_all_scans(admin: User = Depends(auth.get_current_admin), db: AsyncSession = Depends(get_db)):
@@ -54,103 +101,43 @@ async def list_all_scans(admin: User = Depends(auth.get_current_admin), db: Asyn
     return result.scalars().all()
 
 
-@router.get("/vulnerabilities")
-async def list_all_vulnerabilities(admin: User = Depends(auth.get_current_admin), db: AsyncSession = Depends(get_db)):
-    result = await db.execute(select(Vulnerability, Scan).join(Scan, Scan.id == Vulnerability.scan_id).order_by(Vulnerability.id.desc()))
-    return [
-        {
-            "id": vulnerability.id,
-            "scan_id": scan.id,
-            "target_domain": scan.target_domain,
-            "severity": vulnerability.severity,
-            "description": vulnerability.description,
-            "tool": vulnerability.tool,
-            "matched_at": vulnerability.matched_at,
-        }
-        for vulnerability, scan in result.all()
-    ]
-
-
-@router.get("/secrets")
-async def list_all_secrets(admin: User = Depends(auth.get_current_admin), db: AsyncSession = Depends(get_db)):
-    result = await db.execute(select(SecretFinding, Scan).join(Scan, Scan.id == SecretFinding.scan_id).order_by(SecretFinding.id.desc()))
-    return [
-        {
-            "id": secret.id,
-            "scan_id": scan.id,
-            "target_domain": scan.target_domain,
-            "category": secret.category,
-            "severity": secret.severity,
-            "location": secret.location,
-            "value_preview": secret.value_preview,
-        }
-        for secret, scan in result.all()
-    ]
-
-
-@router.get("/graphql")
-async def list_all_graphql_findings(admin: User = Depends(auth.get_current_admin), db: AsyncSession = Depends(get_db)):
-    result = await db.execute(select(GraphQLFinding, Scan).join(Scan, Scan.id == GraphQLFinding.scan_id).order_by(GraphQLFinding.id.desc()))
-    return [
-        {
-            "id": finding.id,
-            "scan_id": scan.id,
-            "target_domain": scan.target_domain,
-            "endpoint": finding.endpoint,
-            "introspection_enabled": finding.introspection_enabled,
-            "schema_types": finding.schema_types,
-            "notes": finding.notes,
-        }
-        for finding, scan in result.all()
-    ]
-
-
-@router.patch("/users/{user_id}/subscription", response_model=schemas.UserResponse)
-async def update_user_subscription(user_id: int, payload: schemas.SubscriptionUpdate, admin: User = Depends(auth.get_current_admin), db: AsyncSession = Depends(get_db)):
-    result = await db.execute(select(User).where(User.id == user_id))
-    user = result.scalars().first()
-    if not user:
-        raise HTTPException(status_code=404, detail="User not found")
-
-    user.role = normalize_role(payload.role)
-    user.subscription_plan = subscription_plan_for_role(user.role)
-    user.subscription_status = payload.subscription_status
-    await db.commit()
-    await db.refresh(user)
-    return user
-
-
-@router.get("/scans/{scan_id}/report")
-async def download_scan_report(scan_id: int, admin: User = Depends(auth.get_current_admin), db: AsyncSession = Depends(get_db)):
+@router.delete("/scans/{scan_id}", status_code=status.HTTP_204_NO_CONTENT)
+async def delete_scan(
+    scan_id: int, 
+    admin: User = Depends(auth.get_current_admin), 
+    db: AsyncSession = Depends(get_db)
+):
     result = await db.execute(select(Scan).where(Scan.id == scan_id))
     scan = result.scalars().first()
     if not scan:
         raise HTTPException(status_code=404, detail="Scan not found")
-    if not scan.report_path or not os.path.exists(scan.report_path):
-        raise HTTPException(status_code=404, detail="Recon report not available")
-    return FileResponse(scan.report_path, filename=os.path.basename(scan.report_path), media_type="text/plain")
-
-
-@router.delete("/scans/{scan_id}")
-async def delete_scan(scan_id: int, admin: User = Depends(auth.get_current_admin), db: AsyncSession = Depends(get_db)):
-    result = await db.execute(select(Scan).where(Scan.id == scan_id))
-    scan = result.scalars().first()
-    if not scan:
-        raise HTTPException(status_code=404, detail="Scan not found")
-
-    target_domain = scan.target_domain
-    output_dir = scan.output_dir
-
-    for model in [GraphQLFinding, SecretFinding, Vulnerability, Directory, Endpoint, Subdomain]:
-        await db.execute(delete(model).where(model.scan_id == scan_id))
-
+        
     await db.delete(scan)
     await db.commit()
+    
+    logger.warning(f"AUDIT | Admin {admin.email} deleted scan ID {scan_id} ({scan.target_domain})")
+    
+    return None
 
-    remaining = (
-        await db.execute(select(func.count(Scan.id)).where(Scan.target_domain == target_domain))
-    ).scalar() or 0
-    if remaining == 0 and output_dir and os.path.exists(output_dir):
-        shutil.rmtree(output_dir, ignore_errors=True)
 
-    return {"detail": "Scan deleted"}
+@router.get("/stats", response_model=schemas.AdminStatsResponse)
+async def get_platform_stats(admin: User = Depends(auth.get_current_admin), db: AsyncSession = Depends(get_db)):
+    """Efficient aggregate counts for the Admin dashboard."""
+    users_res = await db.execute(select(func.count(User.id)))
+    total_users = users_res.scalar() or 0
+    
+    prem_res = await db.execute(select(func.count(User.id)).where(User.subscription_tier == "Premium"))
+    premium_users = prem_res.scalar() or 0
+    
+    scans_res = await db.execute(select(func.count(Scan.id)))
+    total_scans = scans_res.scalar() or 0
+    
+    vuln_res = await db.execute(select(func.count(Vulnerability.id)))
+    total_vulns = vuln_res.scalar() or 0
+    
+    return {
+        "total_users": total_users,
+        "premium_users": premium_users,
+        "total_scans": total_scans,
+        "total_vulnerabilities": total_vulns
+    }

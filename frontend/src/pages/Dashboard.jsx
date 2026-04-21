@@ -73,20 +73,51 @@ export default function Dashboard() {
 
       <div className="glass-panel p-6 rounded-lg relative overflow-hidden">
         <div className="absolute top-0 left-0 w-1 h-full bg-cyber-purple"></div>
-        <h2 className="text-xl font-mono text-white mb-6 uppercase tracking-wider">Recent Operational Targets</h2>
+        <div className="flex justify-between items-center mb-6">
+            <h2 className="text-xl font-mono text-white uppercase tracking-wider">Attack Surface Inventory</h2>
+            <button className="text-xs text-cyber-blue hover:text-white transition-colors border border-cyber-blue/30 px-3 py-1 rounded">View All Targets</button>
+        </div>
         
         {stats.recent_targets.length > 0 ? (
-          <div className="space-y-4">
-            {stats.recent_targets.map((target, idx) => (
-              <div key={idx} className="flex items-center justify-between p-4 bg-cyber-panel/50 border border-cyber-dim/20 rounded hover:border-cyber-blue/40 transition-colors">
-                <span className="font-mono text-cyber-blue">{target}</span>
-                <span className="text-xs text-cyber-dim uppercase font-mono tracking-widest">Logged</span>
-              </div>
-            ))}
+          <div className="overflow-x-auto">
+            <table className="w-full text-left font-mono text-sm">
+                <thead>
+                    <tr className="text-cyber-dim border-b border-cyber-dim/20">
+                        <th className="pb-3 px-2 font-normal uppercase tracking-wider">Domain</th>
+                        <th className="pb-3 px-2 font-normal uppercase tracking-wider">Endpoints</th>
+                        <th className="pb-3 px-2 font-normal uppercase tracking-wider">Vulns</th>
+                        <th className="pb-3 px-2 font-normal uppercase tracking-wider">Risk Score</th>
+                        <th className="pb-3 px-2 font-normal uppercase tracking-wider">Last Scan</th>
+                    </tr>
+                </thead>
+                <tbody>
+                    {stats.recent_targets.map((target, idx) => (
+                    <tr key={idx} className="border-b border-cyber-dim/10 hover:bg-white/5 transition-colors cursor-pointer" onClick={() => navigate('/scans/new', {state: {target: target.domain}})}>
+                        <td className="py-4 px-2 text-cyber-blue font-bold tracking-wide">{target.domain}</td>
+                        <td className="py-4 px-2 text-gray-300">{target.total_endpoints}</td>
+                        <td className="py-4 px-2">
+                            <span className={target.total_vulnerabilities > 0 ? "text-red-400" : "text-gray-500"}>{target.total_vulnerabilities}</span>
+                        </td>
+                        <td className="py-4 px-2">
+                            <div className="flex items-center gap-2">
+                                <div className="w-16 h-2 bg-black/60 rounded overflow-hidden">
+                                    <div className={`h-full ${target.risk_score > 70 ? 'bg-red-500 glow-red' : target.risk_score > 30 ? 'bg-yellow-500 glow-yellow' : 'bg-green-500 glow-green'}`} style={{width: `${target.risk_score}%`}}></div>
+                                </div>
+                                <span className={target.risk_score > 70 ? 'text-red-400 font-bold' : 'text-gray-400'}>{target.risk_score}</span>
+                            </div>
+                        </td>
+                        <td className="py-4 px-2 text-cyber-dim text-xs">
+                            {target.last_scan ? new Date(target.last_scan).toLocaleDateString() : 'Pending'}
+                            {target.last_change_detected && <span className="ml-2 text-[10px] bg-cyber-pink/20 text-cyber-pink px-1 rounded border border-cyber-pink/40 animate-pulse">CHANGED</span>}
+                        </td>
+                    </tr>
+                    ))}
+                </tbody>
+            </table>
           </div>
         ) : (
           <div className="text-center py-10 border border-dashed border-cyber-dim/30 rounded">
-            <p className="text-cyber-dim font-mono text-sm">No historical data available. System idle.</p>
+            <p className="text-cyber-dim font-mono text-sm">Target inventory is empty. Initialize a new scan to discover assets.</p>
           </div>
         )}
       </div>

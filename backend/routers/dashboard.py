@@ -4,7 +4,7 @@ from sqlalchemy import func
 from sqlalchemy.future import select
 
 from backend.database import get_db
-from backend.models import Scan, User, Vulnerability
+from backend.models import Scan, User, Vulnerability, Target
 from backend import auth
 
 router = APIRouter(prefix="/api/dashboard", tags=["dashboard"])
@@ -27,12 +27,22 @@ async def get_dashboard_stats(current_user: User = Depends(auth.get_current_user
     )
     total_vulns = result_vulns.scalar() or 0
 
-    # Recent targets
+    # Target Inventory At-a-Glance
     result_recent = await db.execute(
-        select(Scan.target_domain).where(Scan.user_id == current_user.id)
-        .order_by(Scan.created_at.desc()).limit(5)
+        select(Target).order_by(Target.last_scan.desc().nullslast()).limit(10)
     )
-    recent_targets = [row for row in result_recent.scalars().all()]
+    recent_targets = []
+    for t in result_recent.scalars().all():
+        recent_targets.append({
+            "id": t.id,
+            "domain": t.domain,
+            "project_name": t.project_name,
+            "last_scan": t.last_scan.isoformat() if t.last_scan else None,
+            "total_endpoints": t.total_endpoints,
+            "total_vulnerabilities": t.total_vulnerabilities,
+            "risk_score": t.risk_score,
+            "last_change_detected": t.last_change_detected.isoformat() if t.last_change_detected else None
+        })
 
     return {
         "total_scans": total_scans,

@@ -25,9 +25,7 @@ from backend.models import (
     Vulnerability,
 )
 from backend import schemas, auth
-from backend.routers.websockets import manager
-from backend.services.scanner import trigger_scan_task
-from backend.services.subscriptions import can_manage_automation, can_run_scan, is_admin_role, normalize_role
+from backend.services.scanner.coordinator import trigger_scan_task
 
 router = APIRouter(prefix="/api/scans", tags=["scans"])
 
@@ -109,12 +107,18 @@ async def create_scan(scan_in: schemas.ScanCreate, current_user: User = Depends(
             detail="Free users can only run Basic Scan. Upgrade to Premium to unlock recon, JavaScript intelligence, GraphQL, ffuf, and nuclei.",
         )
 
+    # 1.5 Tier Check
+    if scan_in.scan_type in ["Recon Scan", "Full Scan"] and current_user.subscription_tier != "Premium" and current_user.role != "Admin":
+        raise HTTPException(status_code=403, detail="Premium subscription required for advanced recon.")
+
+    # 2. Rate Limiting / Scan Limits
     result = await db.execute(
         select(func.count(Scan.id)).where(Scan.user_id == current_user.id, Scan.status.in_(["Pending", "Running"]))
     )
     active_count = result.scalar() or 0
-    if active_count >= 3:
+    if active_count >= 100:
         raise HTTPException(status_code=429, detail="Maximum concurrent scan limit reached. Please wait for active operations to complete.")
+
 
     new_scan = Scan(
         user_id=current_user.id,
@@ -137,154 +141,38 @@ async def list_scans(current_user: User = Depends(auth.get_current_user), db: As
     result = await db.execute(select(Scan).where(Scan.user_id == current_user.id).order_by(Scan.created_at.desc()))
     return result.scalars().all()
 
-@router.get("/{scan_id}", response_model=schemas.ScanResponse)
+@router.get("/{scan_id}", response_model=schemas.DetailedScanResponse)
 async def get_scan(scan_id: int, current_user: User = Depends(auth.get_current_user), db: AsyncSession = Depends(get_db)):
     result = await db.execute(select(Scan).where(Scan.id == scan_id))
     scan = result.scalars().first()
     if not scan:
         raise HTTPException(status_code=404, detail="Scan not found")
-    ensure_scan_access(scan, current_user)
+    if scan.user_id != current_user.id and current_user.role != "Admin":
+        raise HTTPException(status_code=403, detail="Not enough permissions")
+        
+    # Fetch relations
+    from backend.models import Subdomain, Endpoint, Vulnerability, Technology, GraphQL, JavaScript, Secret
+    
+    subs = await db.execute(select(Subdomain).where(Subdomain.scan_id == scan_id))
+    scan.subdomains = subs.scalars().all()
+    
+    eps = await db.execute(select(Endpoint).where(Endpoint.scan_id == scan_id))
+    scan.endpoints = eps.scalars().all()
+    
+    vulns = await db.execute(select(Vulnerability).where(Vulnerability.scan_id == scan_id))
+    scan.vulnerabilities = vulns.scalars().all()
+    
+    techs = await db.execute(select(Technology).where(Technology.scan_id == scan_id))
+    scan.technologies = techs.scalars().all()
+
+    gql = await db.execute(select(GraphQL).where(GraphQL.scan_id == scan_id))
+    scan.graphql_endpoints = gql.scalars().all()
+
+    js = await db.execute(select(JavaScript).where(JavaScript.scan_id == scan_id))
+    scan.javascript_files = js.scalars().all()
+
+    secs = await db.execute(select(Secret).where(Secret.scan_id == scan_id))
+    scan.secrets = secs.scalars().all()
+    
     return scan
 
-
-@router.get("/{scan_id}/logs")
-async def get_scan_logs(scan_id: int, current_user: User = Depends(auth.get_current_user), db: AsyncSession = Depends(get_db)):
-    result = await db.execute(select(Scan).where(Scan.id == scan_id))
-    scan = result.scalars().first()
-    if not scan:
-        raise HTTPException(status_code=404, detail="Scan not found")
-    ensure_scan_access(scan, current_user)
-    logs = manager.log_history.get(scan_id, [])
-    return {"logs": logs, "count": len(logs)}
-
-
-@router.get("/{scan_id}/results", response_model=schemas.ScanResultsResponse)
-async def get_scan_results(scan_id: int, current_user: User = Depends(auth.get_current_user), db: AsyncSession = Depends(get_db)):
-    result = await db.execute(select(Scan).where(Scan.id == scan_id))
-    scan = result.scalars().first()
-    if not scan:
-        raise HTTPException(status_code=404, detail="Scan not found")
-    ensure_scan_access(scan, current_user)
-
-    subdomains_result = await db.execute(select(Subdomain).where(Subdomain.scan_id == scan_id).order_by(Subdomain.domain.asc()))
-    endpoints_result = await db.execute(select(Endpoint).where(Endpoint.scan_id == scan_id).order_by(Endpoint.url.asc()))
-    directories_result = await db.execute(select(Directory).where(Directory.scan_id == scan_id).order_by(Directory.path.asc()))
-    vulnerabilities_result = await db.execute(select(Vulnerability).where(Vulnerability.scan_id == scan_id).order_by(Vulnerability.severity.asc(), Vulnerability.description.asc()))
-    secrets_result = await db.execute(select(SecretFinding).where(SecretFinding.scan_id == scan_id).order_by(SecretFinding.severity.asc(), SecretFinding.category.asc()))
-    graphql_result = await db.execute(select(GraphQLFinding).where(GraphQLFinding.scan_id == scan_id).order_by(GraphQLFinding.endpoint.asc()))
-
-    report_download_url = f"/api/scans/{scan_id}/report" if scan.report_path else None
-    return {
-        "scan": scan,
-        "subdomains": subdomains_result.scalars().all(),
-        "endpoints": endpoints_result.scalars().all(),
-        "directories": directories_result.scalars().all(),
-        "vulnerabilities": vulnerabilities_result.scalars().all(),
-        "secrets": secrets_result.scalars().all(),
-        "graphql_findings": graphql_result.scalars().all(),
-        "graph_data": scan.graph_data or {},
-        "summary": scan.summary or {},
-        "report_download_url": report_download_url,
-    }
-
-
-@router.get("/{scan_id}/report")
-async def download_scan_report(scan_id: int, current_user: User = Depends(auth.get_current_user), db: AsyncSession = Depends(get_db)):
-    result = await db.execute(select(Scan).where(Scan.id == scan_id))
-    scan = result.scalars().first()
-    if not scan:
-        raise HTTPException(status_code=404, detail="Scan not found")
-    ensure_scan_access(scan, current_user)
-    if not scan.report_path or not os.path.exists(scan.report_path):
-        raise HTTPException(status_code=404, detail="Recon report not available")
-    return FileResponse(scan.report_path, filename=os.path.basename(scan.report_path), media_type="text/plain")
-
-
-@router.post("/automation/targets", response_model=List[schemas.MonitoringTargetResponse])
-async def create_automation_targets(payload: schemas.AutomationBatchCreate, current_user: User = Depends(auth.get_current_user), db: AsyncSession = Depends(get_db)):
-    if not can_manage_automation(current_user.role):
-        raise HTTPException(status_code=403, detail="Continuous monitoring is available to Premium and Administrator accounts only")
-
-    if not payload.domains:
-        raise HTTPException(status_code=400, detail="At least one domain is required")
-
-    if len(payload.domains) > MAX_AUTOMATION_DOMAINS:
-        raise HTTPException(status_code=400, detail=f"Maximum {MAX_AUTOMATION_DOMAINS} domains allowed per automation batch")
-
-    if payload.interval_minutes < MIN_AUTOMATION_INTERVAL_MINUTES or payload.interval_minutes > MAX_AUTOMATION_INTERVAL_MINUTES:
-        raise HTTPException(
-            status_code=400,
-            detail=f"interval_minutes must be between {MIN_AUTOMATION_INTERVAL_MINUTES} and {MAX_AUTOMATION_INTERVAL_MINUTES}",
-        )
-
-    scan_type = validate_scan_type(payload.scan_type)
-
-    domains = sorted({validate_domain(domain) for domain in payload.domains})
-    for domain in domains:
-        await verify_domain_is_public(domain)
-
-    targets: list[MonitoringTarget] = []
-
-    for domain in domains:
-        result = await db.execute(
-            select(MonitoringTarget).where(MonitoringTarget.user_id == current_user.id, MonitoringTarget.domain == domain)
-        )
-        target = result.scalars().first()
-        if not target:
-            target = MonitoringTarget(
-                user_id=current_user.id,
-                domain=domain,
-                scan_type=scan_type,
-                interval_minutes=payload.interval_minutes,
-                enabled=True,
-                next_run_at=datetime.utcnow(),
-                last_snapshot={},
-                last_diff={},
-            )
-            db.add(target)
-        else:
-            target.scan_type = scan_type
-            target.interval_minutes = payload.interval_minutes
-            target.enabled = True
-            target.next_run_at = datetime.utcnow()
-        targets.append(target)
-
-    await db.commit()
-    for target in targets:
-        await db.refresh(target)
-    return targets
-
-
-@router.get("/automation/targets", response_model=List[schemas.MonitoringTargetResponse])
-async def list_automation_targets(current_user: User = Depends(auth.get_current_user), db: AsyncSession = Depends(get_db)):
-    result = await db.execute(
-        select(MonitoringTarget).where(MonitoringTarget.user_id == current_user.id).order_by(MonitoringTarget.created_at.desc())
-    )
-    return result.scalars().all()
-
-
-@router.patch("/automation/targets/{target_id}", response_model=schemas.MonitoringTargetResponse)
-async def update_automation_target(target_id: int, payload: schemas.AutomationTargetUpdate, current_user: User = Depends(auth.get_current_user), db: AsyncSession = Depends(get_db)):
-    result = await db.execute(select(MonitoringTarget).where(MonitoringTarget.id == target_id))
-    target = result.scalars().first()
-    if not target or target.user_id != current_user.id:
-        raise HTTPException(status_code=404, detail="Monitoring target not found")
-
-    target.enabled = payload.enabled
-    if payload.enabled and not target.next_run_at:
-        target.next_run_at = datetime.utcnow()
-    await db.commit()
-    await db.refresh(target)
-    return target
-
-
-@router.delete("/automation/targets/{target_id}")
-async def delete_automation_target(target_id: int, current_user: User = Depends(auth.get_current_user), db: AsyncSession = Depends(get_db)):
-    result = await db.execute(select(MonitoringTarget).where(MonitoringTarget.id == target_id))
-    target = result.scalars().first()
-    if not target or target.user_id != current_user.id:
-        raise HTTPException(status_code=404, detail="Monitoring target not found")
-
-    await db.delete(target)
-    await db.commit()
-    return {"detail": "Monitoring target deleted"}

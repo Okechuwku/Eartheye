@@ -14,22 +14,9 @@ from starlette.middleware.trustedhost import TrustedHostMiddleware
 from backend.database import engine, Base, get_db, AsyncSessionLocal
 from backend.models import User, Scan
 from backend import schemas, auth
-from backend.routers import scans, admin, dashboard, websockets
-from backend.security import build_rate_limit_key, rate_limiter
-from backend.services.automation import automation_worker
-from backend.services.schema_sync import ensure_runtime_schema
-from backend.services.subscriptions import normalize_role, subscription_plan_for_role
-
-DEFAULT_ADMIN_EMAIL = os.getenv("DEFAULT_ADMIN_EMAIL", "okechuwkujoel44@gmail.com").strip().lower()
-DEFAULT_ADMIN_PASSWORD = os.getenv("DEFAULT_ADMIN_PASSWORD", "Scientist44@").strip()
-CORS_ORIGINS = [origin.strip() for origin in os.getenv("CORS_ORIGINS", "http://localhost:5173,http://127.0.0.1:5173").split(",") if origin.strip()]
-ALLOWED_HOSTS = [host.strip() for host in os.getenv("ALLOWED_HOSTS", "localhost,127.0.0.1,eartheye.me,www.eartheye.me,api.eartheye.me").split(",") if host.strip()]
-
-RATE_LIMIT_WINDOW_SECONDS = int(os.getenv("RATE_LIMIT_WINDOW_SECONDS", "60"))
-RATE_LIMIT_GLOBAL_REQUESTS = int(os.getenv("RATE_LIMIT_GLOBAL_REQUESTS", "240"))
-RATE_LIMIT_AUTH_REQUESTS = int(os.getenv("RATE_LIMIT_AUTH_REQUESTS", "20"))
-RATE_LIMIT_SCAN_CREATE_REQUESTS = int(os.getenv("RATE_LIMIT_SCAN_CREATE_REQUESTS", "10"))
-RATE_LIMIT_DISABLED = os.getenv("RATE_LIMIT_DISABLED", "false").strip().lower() == "true"
+from backend.routers import scans, admin, dashboard, websockets, targets
+from fastapi.staticfiles import StaticFiles
+import os
 
 app = FastAPI(title="Eartheye API")
 
@@ -37,6 +24,12 @@ app.include_router(scans.router)
 app.include_router(admin.router)
 app.include_router(dashboard.router)
 app.include_router(websockets.router)
+app.include_router(targets.router)
+
+# Mount Scans Directory for Screenshot Visual Triage
+scans_dir = os.path.abspath(os.path.join(os.path.dirname(__file__), "../../scans"))
+os.makedirs(scans_dir, exist_ok=True)
+app.mount("/api/scans/static", StaticFiles(directory=scans_dir), name="scans_static")
 
 app.add_middleware(
     CORSMiddleware,
@@ -45,6 +38,7 @@ app.add_middleware(
     allow_methods=["GET", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"],
     allow_headers=["Authorization", "Content-Type", "Accept", "Origin"],
 )
+from backend.scheduler import start_scheduler
 
 app.add_middleware(
     TrustedHostMiddleware,
@@ -84,6 +78,9 @@ async def enforce_rate_limits(request: Request, call_next):
 
 @app.on_event("startup")
 async def startup():
+    # Start APScheduler background monitor
+    start_scheduler()
+    
     # Auto-create tables for local testing
     async with engine.begin() as conn:
         await conn.run_sync(Base.metadata.create_all)
